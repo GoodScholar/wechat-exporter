@@ -62,10 +62,10 @@ test('浏览器轮询识别归档缺失，移除下载入口，并能恢复为�
     assert.deepEqual(item.successfulFormats, []);
     assert.deepEqual(Object.keys(item.failedFormats).sort(), ['html', 'markdown']);
     assert.equal((await fetch(`${base}/api/jobs/${job.id}/download`)).status, 404);
-    await page.locator('#items').getByRole('button', { name: '恢复未完成项' }).waitFor();
+    await page.locator('#items').getByRole('button', { name: '重新导出' }).waitFor();
     assert.equal(await page.getByRole('link', { name: '下载文章' }).count(), 0);
     assert.equal(await page.locator('#download-all').isVisible(), false);
-    await page.locator('#items').getByRole('button', { name: '恢复未完成项' }).click();
+    await page.locator('#items').getByRole('button', { name: '重新导出' }).click();
     await page.getByRole('link', { name: '下载文章' }).waitFor();
     const event = page.waitForEvent('download');
     await page.getByRole('link', { name: '下载文章' }).click();

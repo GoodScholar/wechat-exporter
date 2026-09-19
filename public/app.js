@@ -49,7 +49,26 @@ function statusText(item) {
   return ({ queued: '等待中', running: '正在导出', success: '已导出', error: '导出失败', cancelled: '已取消' })[item.status] || '处理中';
 }
 function formatFailures(item) {
-  return Object.entries(item.failedFormats || {}).map(([format, error]) => `<p class="format-failure">${escape(formatName[format] || format)}：${escape(error)}</p>`).join('');
+  return Object.entries(item.failedFormats || {}).filter(([, error]) => error !== item.error).map(([format, error]) => `<p class="format-failure">${escape(formatName[format] || format)}：${escape(error)}</p>`).join('');
+}
+
+function recoveryAdvice(item) {
+  if (!['error', 'partial'].includes(item.status)) return { hints: [] };
+  const messages = [item.error, ...Object.values(item.failedFormats || {})].filter(Boolean);
+  const has = pattern => messages.some(message => pattern.test(message));
+  const missing = has(/^导出文件已被移除/);
+  const pdfSetup = has(/^PDF 需要 Chromium/);
+  const verify = has(/^微信要求访问验证/);
+  const original = has(/未找到.*正文|暂不支持的消息类型|文章已删除或无法查看|公众号账号已迁移/);
+  const network = has(/网络|无法连接|请求超时|HTTP \d{3}/);
+  const hints = [];
+  if (missing) hints.push('原文件已被移动或删除，重新导出即可生成新文件。');
+  if (pdfSetup) hints.push('PDF 所需浏览器尚未就绪。请展开安装说明，完成后重试；已有文件仍可下载。');
+  if (verify) hints.push('请在独立浏览器中完成微信验证，保持文章页面打开，然后重试。');
+  if (original) hints.push('请先查看原文，确认文章可访问且为图文消息；若已迁移，请复制新链接重新导出。');
+  if (network) hints.push('请检查网络连接，稍后重试；仅遇到微信验证页面时才需要浏览器验证。');
+  if (!hints.length) hints.push('请根据上方错误信息处理后重试，已成功生成的格式会保留。');
+  return { hints, pdfSetup, verify, original, retryLabel: missing ? '重新导出' : pdfSetup ? '安装后重试 PDF' : verify ? '验证后重试' : undefined };
 }
 
 function inputCount() {
@@ -307,11 +326,15 @@ function render() {
   $('#batch-info').innerHTML = `${job.duplicates ? `已去重 ${job.duplicates} 个重复链接。` : ''}${(job.invalid || []).length ? `<details><summary>已跳过 ${job.invalid.length} 个无效输入，展开查看</summary>${job.invalid.map(item => `<div>${escape(item.value)}：${escape(item.error)}</div>`).join('')}</details>` : ''}`;
   $('#items').innerHTML = job.items.map((item, index) => {
     const warnings = itemWarnings(item);
+    const advice = recoveryAdvice(item);
+    const guidance = advice.hints.map(hint => `<p class="recovery-hint">${escape(hint)}</p>`).join('')
+      + (advice.pdfSetup ? '<details class="warning-details"><summary>PDF 环境说明</summary><p>在工具所在目录打开终端，运行 <code>npm run setup:browser</code> 安装 Chromium。安装完成后返回此处重试 PDF，无需重新抓取已有正文和图片。</p></details>' : '');
     const retry = ['partial', 'error', 'cancelled'].includes(item.status)
-      ? `<button type="button" class="secondary retry-item" data-item-id="${escape(item.id)}">${item.status === 'partial' ? '仅重试失败格式' : '恢复未完成项'}</button>` : '';
+      ? `<button type="button" class="secondary retry-item" data-item-id="${escape(item.id)}">${advice.retryLabel || (item.status === 'partial' ? '仅重试失败格式' : '恢复未完成项')}</button>` : '';
     const download = isDownloadable(item) ? `<a class="secondary" href="/api/items/${item.id}/download" aria-label="下载文章">下载 ZIP</a>` : '';
-    const verify = item.status === 'error' ? `<button type="button" class="secondary verify" data-url="${escape(item.url)}">浏览器验证</button>` : '';
-    return `<article class="article-row"><span class="article-index">${String(index + 1).padStart(2, '0')}</span><div class="article-main"><div class="article-title">${escape(item.title || '微信公众号文章')}</div><a class="article-url" href="${escape(item.url)}" target="_blank" rel="noreferrer">${escape(item.url)}</a>${item.account || item.date ? `<div class="article-meta">${escape([item.account, item.date].filter(Boolean).join(' / '))}</div>` : ''}${progressText(item.progress) && ['queued', 'running'].includes(item.status) ? `<p class="article-progress">${escape(progressText(item.progress))}</p>` : ''}${item.error ? `<p class="article-message">${escape(item.error)}</p>` : ''}${formatFailures(item)}${warnings.length ? `<details class="warning-details"><summary>${warnings.length} 条导出提示</summary>${warnings.map(warning => `<p>${escape(warning)}</p>`).join('')}</details>` : ''}</div><div class="article-end"><span class="status ${escape(item.status)}">${escape(statusText(item))}</span>${download}${retry}${verify}</div></article>`;
+    const verify = advice.verify ? `<button type="button" class="secondary verify" data-url="${escape(item.url)}">浏览器验证</button>` : '';
+    const original = advice.original ? `<a class="secondary" href="${escape(item.url)}" target="_blank" rel="noreferrer">查看原文</a>` : '';
+    return `<article class="article-row"><span class="article-index">${String(index + 1).padStart(2, '0')}</span><div class="article-main"><div class="article-title">${escape(item.title || '微信公众号文章')}</div><a class="article-url" href="${escape(item.url)}" target="_blank" rel="noreferrer">${escape(item.url)}</a>${item.account || item.date ? `<div class="article-meta">${escape([item.account, item.date].filter(Boolean).join(' / '))}</div>` : ''}${progressText(item.progress) && ['queued', 'running'].includes(item.status) ? `<p class="article-progress">${escape(progressText(item.progress))}</p>` : ''}${item.error ? `<p class="article-message">${escape(item.error)}</p>` : ''}${formatFailures(item)}${guidance}${warnings.length ? `<details class="warning-details"><summary>${warnings.length} 条导出提示</summary>${warnings.map(warning => `<p>${escape(warning)}</p>`).join('')}</details>` : ''}</div><div class="article-end"><span class="status ${escape(item.status)}">${escape(statusText(item))}</span>${download}${original}${verify}${retry}</div></article>`;
   }).join('');
 }
 
