@@ -40,6 +40,12 @@
     <div id="notice" class="notice" role="status" hidden></div>
     <section class="tasks" aria-labelledby="tasks-title">
       <div class="tasks-heading"><div><h2 id="tasks-title">导出记录</h2><p id="summary">从第一篇想收藏的文章开始</p></div><div class="task-actions"><label for="history" class="sr-only">选择导出批次</label><select id="history" hidden></select><button type="button" id="cancel" class="secondary danger" hidden>取消本批次</button><button type="button" id="retry" class="secondary" hidden>恢复未完成项</button><a id="download-all" class="secondary" hidden>打包下载</a></div></div>
+      <div id="history-filters" class="history-filters" hidden>
+        <label>搜索标题或公众号<input id="history-search" type="search" autocomplete="off" placeholder="搜索所有历史批次"></label>
+        <label><span id="history-status-label">导出状态</span><select id="history-status" aria-labelledby="history-status-label"><option value="">全部状态</option><option value="success">已导出</option><option value="partial">部分成功</option><option value="error">导出失败</option><option value="queued">等待中</option><option value="running">正在导出</option><option value="cancelled">已取消</option></select></label>
+        <button type="button" id="history-reset" class="text-button">清空筛选</button>
+        <p id="history-result" role="status"></p>
+      </div>
       <progress id="progress" value="0" max="1" hidden aria-label="当前批次导出进度"></progress>
       <div id="batch-info" class="batch-info" hidden></div>
       <div id="save-location" class="save-location" role="status" hidden><strong id="save-location-heading">本批次保存目录</strong><code id="saved-directory"></code><div class="location-actions"><button type="button" id="copy-path" class="secondary">复制路径</button><button type="button" id="open-directory" class="secondary">打开文件夹</button></div><p>点击「下载 ZIP」或「打包下载」会由浏览器另存一份，位置由浏览器设置或保存对话框决定；这与上方工具保存的文件夹不同。</p></div>

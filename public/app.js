@@ -297,8 +297,25 @@ function render() {
   const active = jobs.some(job => job.items.some(item => ['running', 'queued'].includes(item.status)));
   $('#submit').disabled = submitting || active || (inputMode === 'rss' && (rssLoading || rssSelected.size === 0));
   $('#submit').innerHTML = active ? '正在导出，请稍候' : '开始导出 <span aria-hidden="true">↓</span>';
-  const job = jobs.find(job => job.id === selectedId) || jobs[0];
-  if (!job) return;
+  const keyword = $('#history-search').value.trim().toLocaleLowerCase();
+  const status = $('#history-status').value;
+  const filtering = Boolean(keyword || status);
+  const matches = item => (!keyword || [item.title, item.account].some(value => String(value || '').toLocaleLowerCase().includes(keyword))) && (!status || item.status === status);
+  const visibleJobs = jobs.filter(job => job.items.some(matches));
+  $('#history-filters').hidden = !jobs.length;
+  $('#history-reset').disabled = !filtering;
+  const total = jobs.reduce((count, job) => count + job.items.length, 0);
+  const matched = visibleJobs.reduce((count, job) => count + job.items.filter(matches).length, 0);
+  $('#history-result').textContent = filtering ? `共 ${total} 篇，匹配 ${matched} 篇 / ${visibleJobs.length} 个批次。下方展示所选批次的匹配文章；批量操作仍作用于整个批次。` : `共 ${total} 篇 / ${jobs.length} 个批次，可搜索所有历史记录。`;
+  const job = visibleJobs.find(job => job.id === selectedId) || visibleJobs[0];
+  if (!job) {
+    if (jobs.length) {
+      $('#summary').textContent = '没有匹配的导出记录';
+      $('#items').innerHTML = '<div class="empty"><strong>试试其他关键词或状态</strong><p>清空筛选可查看全部记录。</p></div>';
+      for (const selector of ['#history', '#progress', '#retry', '#cancel', '#download-all', '#save-location', '#batch-info']) $(selector).hidden = true;
+    }
+    return;
+  }
   selectedId = job.id;
   const success = job.items.filter(item => item.status === 'success').length;
   const partial = job.items.filter(item => item.status === 'partial').length;
@@ -311,8 +328,8 @@ function render() {
   $('#progress').hidden = complete;
   $('#progress').max = job.items.length;
   $('#progress').value = finished;
-  $('#history').hidden = jobs.length < 2;
-  $('#history').innerHTML = jobs.map(entry => `<option value="${entry.id}" ${entry.id === selectedId ? 'selected' : ''}>${escape(new Date(entry.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} / ${entry.items.length} 篇</option>`).join('');
+  $('#history').hidden = visibleJobs.length < 2;
+  $('#history').innerHTML = visibleJobs.map(entry => `<option value="${entry.id}" ${entry.id === selectedId ? 'selected' : ''}>${escape(new Date(entry.createdAt).toLocaleString('zh-CN', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }))} / ${entry.items.length} 篇</option>`).join('');
   const unfinished = job.items.some(item => ['error', 'partial', 'cancelled'].includes(item.status));
   $('#retry').hidden = !unfinished;
   $('#retry').disabled = !complete;
@@ -325,6 +342,7 @@ function render() {
   $('#batch-info').hidden = !job.duplicates && !(job.invalid || []).length;
   $('#batch-info').innerHTML = `${job.duplicates ? `已去重 ${job.duplicates} 个重复链接。` : ''}${(job.invalid || []).length ? `<details><summary>已跳过 ${job.invalid.length} 个无效输入，展开查看</summary>${job.invalid.map(item => `<div>${escape(item.value)}：${escape(item.error)}</div>`).join('')}</details>` : ''}`;
   $('#items').innerHTML = job.items.map((item, index) => {
+    if (!matches(item)) return '';
     const warnings = itemWarnings(item);
     const advice = recoveryAdvice(item);
     const guidance = advice.hints.map(hint => `<p class="recovery-hint">${escape(hint)}</p>`).join('')
@@ -374,6 +392,8 @@ $('#export-form').addEventListener('submit', async event => {
     const formats = [...document.querySelectorAll('input[name="format"]:checked')].map(input => input.value);
     const job = await api('/api/jobs', { text, formats });
     selectedId = job.id;
+    $('#history-search').value = '';
+    $('#history-status').value = '';
     $('#notice').hidden = true;
     await refresh();
   } catch (error) { notify(error.message, true); }
@@ -390,6 +410,14 @@ $('#save-directory').addEventListener('click', async () => {
 $('#restore-directory').addEventListener('click', async () => {
   $('#output-directory').value = '';
   $('#save-directory').click();
+});
+$('#history-search').addEventListener('input', render);
+$('#history-status').addEventListener('change', render);
+$('#history-reset').addEventListener('click', () => {
+  $('#history-search').value = '';
+  $('#history-status').value = '';
+  render();
+  $('#history-search').focus();
 });
 $('#history').addEventListener('change', event => { selectedId = event.target.value; render(); });
 $('#download-all').addEventListener('click', notifyDownload);
