@@ -78,11 +78,14 @@ export function parseArticle(html, url) {
     allowedSchemes: ['https', 'http', 'mailto'],
     allowedStyles: { '*': {
       'color': [/^[#\w\s(),.%+-]+$/], 'background-color': [/^[#\w\s(),.%+-]+$/],
+      'background': [/^(#[\da-f]{3,8}|rgba?\([\d\s.,%]+\)|hsla?\([\d\s.,%]+\)|[a-z]+)$/i],
       'text-align': [/^(left|right|center|justify)$/], 'font-weight': [/^(normal|bold|[1-9]00)$/],
       'font-size': [/^\d+(\.\d+)?(px|em|rem|%)$/], 'font-style': [/^(normal|italic)$/],
       'line-height': [/^[\d.]+(px|em|rem|%)?$/], 'text-decoration': [/^(underline|line-through|none)$/]
     } }
   });
+  const readable = load(content, null, false);
+  if (!readable.root().text().trim() && !readable('img[src]').length) throw new Error('未找到可导出的正文，可能是暂不支持的消息类型，请在微信中查看原文');
   return { title, account, author, date, url, content, warnings };
 }
 

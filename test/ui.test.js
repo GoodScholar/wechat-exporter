@@ -125,3 +125,16 @@ test('界面管理保存目录，并呈现部分成功、阶段进度、取消�
     await rm(dir, { recursive: true, force: true });
   }
 });
+
+test('离线文章保留深色背景上的白字，同时禁止外部背景图片', async () => {
+  const { parseArticle, renderHtml } = await import('../src/article.js');
+  const article = parseArticle('<h1 id="activity-name">配色验收</h1><div id="js_content"><section style="background:#0d1117"><p style="color:#ffffff">深色卡片正文</p></section><p style="background:url(https://example.com/tracker.png)">外部背景</p></div>', 'https://mp.weixin.qq.com/s/colors');
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.setContent(renderHtml(article));
+    assert.equal(await page.locator('main section').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(13, 17, 23)');
+    assert.equal(await page.locator('main section p').evaluate(el => getComputedStyle(el).color), 'rgb(255, 255, 255)');
+    assert.equal(await page.locator('main > p').evaluate(el => getComputedStyle(el).backgroundImage), 'none');
+  } finally { await browser.close(); }
+});

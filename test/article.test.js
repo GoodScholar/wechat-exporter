@@ -55,3 +55,8 @@ test('作者只读取一个节点，公众号与作者相同时只显示一次',
   assert.equal((renderHtml(article).match(/测试公众号/g) || []).length, 1);
   assert.equal((renderMarkdown(article).match(/测试公众号/g) || []).length, 1);
 });
+
+test('清理脚本和互动内容后没有正文时，不得导出只有标题的空文章', () => {
+  const html = '<h1 id="activity-name">特殊消息</h1><div id="js_content"><script>var description="只有脚本数据";</script><style>.x{color:red}</style><div><span> </span></div></div>';
+  assert.throws(() => parseArticle(html, 'https://mp.weixin.qq.com/s/empty-content'), /正文|消息类型/);
+});
