@@ -20,15 +20,17 @@ test('窄屏表格保持短值完整并可独立滚动，打印时完整适配�
     }));
     assert.deepEqual(lines, [1, 1, 1, 1], '短单词和数值不得被窄屏强制拆行');
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
+    // Force genuinely wide content instead of relying on platform font widths.
+    await page.locator('td').first().evaluate(el => { el.textContent = 'LongIdentifier'.repeat(30); });
     const region = page.getByRole('region', { name: '文章表格，可左右滚动' });
     assert.equal(await region.evaluate(el => el.scrollWidth > el.clientWidth), true);
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     await region.focus();
     await page.keyboard.press('ArrowRight');
     await page.waitForFunction(() => document.querySelector('[role="region"]').scrollLeft > 0);
     await page.emulateMedia({ media: 'print' });
     await page.setViewportSize({ width: 673, height: 986 });
-    // An unbroken value must wrap for printing rather than be hidden off the sheet.
-    await page.locator('td').first().evaluate(el => { el.textContent = 'LongIdentifier'.repeat(30); });
+    // The same wide value must wrap for printing rather than be hidden off the sheet.
     assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= innerWidth), true);
     assert.equal(await region.evaluate(el => el.scrollWidth <= el.clientWidth + 1), true);
     assert.equal(await page.locator('td').count(), 10);
