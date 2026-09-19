@@ -8,6 +8,7 @@ import { JobStore } from './jobs.js';
 import { exportArticle, fetchResource } from './exporter.js';
 import { createVerificationBrowser } from './browser.js';
 import { fetchFeed } from './feeds.js';
+import { SavedFeeds } from './saved-feeds.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
@@ -29,6 +30,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     getHtml: async (articleUrl, { signal } = {}) => await verification.read(articleUrl) || (await fetchResource(articleUrl, 'article', { signal })).bytes.toString('utf8')
   })), interval);
   app.locals.store = store;
+  const savedFeeds = new SavedFeeds(dataDir);
   app.locals.verification = verification;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
@@ -47,6 +49,12 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     res.json({ message: '已打开保存目录' });
   });
   app.get('/api/jobs', (req, res) => res.json(store.list()));
+  app.get('/api/feeds', (req, res) => res.json(savedFeeds.items));
+  app.post('/api/feeds', (req, res) => res.json(savedFeeds.save(req.body)));
+  app.post('/api/feeds/:id/delete', (req, res) => {
+    savedFeeds.remove(req.params.id);
+    res.json({ message: '已删除订阅源，已导出的文件仍保留' });
+  });
   app.post('/api/feeds/preview', async (req, res) => res.json(await fetchFeed(req.body.url)));
   app.post('/api/jobs', (req, res) => {
     const job = store.create(req.body.text, req.body.formats);

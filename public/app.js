@@ -12,6 +12,9 @@ let rssSelected = new Set();
 let rssPreviewUrl = '';
 let rssLoading = false;
 let rssRequest = 0;
+let savedFeeds = [];
+let savedFeedsLoaded = false;
+let savedFeedsBusy = false;
 
 function notify(message, error = false) {
   $('#notice').textContent = message;
@@ -89,6 +92,87 @@ function clearRssPreview() {
   render();
 }
 
+function invalidateRss() {
+  rssRequest += 1;
+  rssLoading = false;
+  $('#rss-load').disabled = false;
+  clearRssPreview();
+}
+
+function savedFeedMessage(message, error = false) {
+  $('#rss-saved-message').textContent = message;
+  $('#rss-saved-message').className = 'rss-message' + (error ? ' error' : '');
+}
+
+function savedFeedControls() {
+  for (const selector of ['#rss-saved', '#rss-name', '#rss-url', '#rss-save']) $(selector).disabled = savedFeedsBusy;
+  $('#rss-delete').disabled = savedFeedsBusy || !$('#rss-saved').value;
+  $('#rss-load').textContent = $('#rss-saved').value ? '刷新文章' : '读取文章';
+}
+
+function renderSavedFeeds(id = '') {
+  $('#rss-saved').innerHTML = '<option value="">输入新订阅源</option>' + savedFeeds.map(source => `<option value="${escape(source.id)}">${escape(source.name)}</option>`).join('');
+  $('#rss-saved').value = id;
+  savedFeedControls();
+}
+
+async function loadSavedFeeds() {
+  savedFeedsBusy = true;
+  savedFeedControls();
+  try {
+    savedFeeds = await api('/api/feeds');
+    renderSavedFeeds();
+    savedFeedsLoaded = true;
+  } catch (error) { savedFeedMessage(`读取常用订阅源失败：${error.message}。切换输入方式后可重试。`, true); }
+  finally { savedFeedsBusy = false; savedFeedControls(); }
+}
+
+$('#rss-saved').addEventListener('change', () => {
+  const source = savedFeeds.find(item => item.id === $('#rss-saved').value);
+  $('#rss-name').value = source?.name || '';
+  $('#rss-url').value = source?.url || '';
+  for (const selector of ['#rss-title-filter', '#rss-start-date', '#rss-end-date']) $(selector).value = '';
+  invalidateRss();
+  rssMessage(source ? '已切换订阅源，点击「刷新文章」读取最新列表。' : '填写 RSS 地址后读取文章，也可以保存为常用订阅源。');
+  savedFeedMessage('订阅源仅保存在本机；删除订阅源不会删除已导出的文件。');
+  savedFeedControls();
+});
+
+$('#rss-save').addEventListener('click', async () => {
+  if (savedFeedsBusy) return;
+  savedFeedsBusy = true;
+  savedFeedControls();
+  try {
+    const source = await api('/api/feeds', { name: $('#rss-name').value, url: $('#rss-url').value });
+    const index = savedFeeds.findIndex(item => item.id === source.id);
+    if (index < 0) savedFeeds.push(source); else savedFeeds[index] = source;
+    if ($('#rss-url').value !== source.url) invalidateRss();
+    $('#rss-name').value = source.name;
+    $('#rss-url').value = source.url;
+    renderSavedFeeds(source.id);
+    savedFeedMessage('订阅源已保存到本机');
+  } catch (error) { savedFeedMessage(`保存失败：${error.message}`, true); }
+  finally { savedFeedsBusy = false; savedFeedControls(); }
+});
+
+$('#rss-delete').addEventListener('click', async () => {
+  const id = $('#rss-saved').value;
+  if (!id || savedFeedsBusy) return;
+  savedFeedsBusy = true;
+  savedFeedControls();
+  try {
+    await api(`/api/feeds/${encodeURIComponent(id)}/delete`, {});
+    savedFeeds = savedFeeds.filter(item => item.id !== id);
+    renderSavedFeeds();
+    $('#rss-name').value = '';
+    $('#rss-url').value = '';
+    invalidateRss();
+    rssMessage('');
+    savedFeedMessage('已删除订阅源，已导出的文件仍保留');
+  } catch (error) { savedFeedMessage(`删除失败：${error.message}`, true); }
+  finally { savedFeedsBusy = false; savedFeedControls(); }
+});
+
 function renderRss() {
   if (!rssItems.length) {
     $('#rss-preview').hidden = true;
@@ -116,7 +200,10 @@ function setInputMode(mode) {
   $('#input-mode-links').setAttribute('aria-pressed', String(!rss));
   $('#input-mode-rss').classList.toggle('active', rss);
   $('#input-mode-rss').setAttribute('aria-pressed', String(rss));
-  if (rss) renderRss();
+  if (rss) {
+    renderRss();
+    if (!savedFeedsLoaded && !savedFeedsBusy) void loadSavedFeeds();
+  }
   render();
 }
 
@@ -159,11 +246,10 @@ $('#input-mode-links').addEventListener('click', () => setInputMode('links'));
 $('#input-mode-rss').addEventListener('click', () => setInputMode('rss'));
 $('#rss-load').addEventListener('click', loadRss);
 $('#rss-url').addEventListener('input', () => {
+  $('#rss-saved').value = '';
+  savedFeedControls();
   if (rssPreviewUrl || rssLoading) {
-    rssRequest += 1;
-    rssLoading = false;
-    $('#rss-load').disabled = false;
-    clearRssPreview();
+    invalidateRss();
     rssMessage('RSS 地址已变化，请重新读取文章。');
   }
 });

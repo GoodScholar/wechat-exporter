@@ -92,7 +92,7 @@ export function parseFeed(xml, sourceUrl) {
   return { title: feedTitle, items, skipped, duplicates, truncated };
 }
 
-function sourceUrl(value) {
+export function normalizeFeedUrl(value) {
   if (typeof value !== 'string' || !value.trim() || value.length > 4096) throw new Error('请输入不超过 4096 字符的 RSS 地址');
   let url;
   try { url = new URL(value.trim()); } catch { throw new Error('请输入完整的 RSS 地址'); }
@@ -127,7 +127,7 @@ async function cancelBody(response) {
 }
 
 export async function fetchFeed(value) {
-  let url = sourceUrl(value);
+  let url = normalizeFeedUrl(value);
   const signal = AbortSignal.timeout(15_000);
   for (let redirects = 0; redirects <= 3; redirects++) {
     let response;
@@ -148,7 +148,7 @@ export async function fetchFeed(value) {
       const location = response.headers.get('location');
       if (!location) { await cancelBody(response); throw new Error('RSS 地址重定向无效'); }
       let next;
-      try { next = sourceUrl(new URL(location, url).href); } catch (error) { await cancelBody(response); throw error; }
+      try { next = normalizeFeedUrl(new URL(location, url).href); } catch (error) { await cancelBody(response); throw error; }
       if (next.origin !== url.origin) { await cancelBody(response); throw new Error('RSS 地址跳转到了其他来源，请填写最终 RSS 地址'); }
       next.hash = '';
       await cancelBody(response);

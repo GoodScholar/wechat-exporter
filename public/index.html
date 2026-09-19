@@ -12,7 +12,13 @@
           <div class="input-footer"><span id="input-help">支持短链接、完整长链接，每批最多 50 篇</span><span id="link-count">尚未添加链接</span></div></div>
         <div id="rss-panel" hidden>
           <p class="rss-help">填写文章 RSS 地址，支持本机订阅服务。使用 we-mp-rss 时请关闭本地链接（<code>RSS_LOCAL=false</code>）；需要已有订阅服务。</p>
+          <div class="rss-saved-controls">
+            <label for="rss-saved">常用订阅源</label><select id="rss-saved"><option value="">输入新订阅源</option></select>
+            <label for="rss-name">订阅源名称</label><input id="rss-name" type="text" maxlength="100" autocomplete="off" placeholder="例如：技术阅读">
+          </div>
           <div class="rss-load"><label for="rss-url">RSS 地址</label><input id="rss-url" type="text" inputmode="url" autocomplete="off" placeholder="http://127.0.0.1:1200/feed.xml"><button type="button" id="rss-load" class="secondary">读取文章</button></div>
+          <div class="rss-saved-actions"><button type="button" id="rss-save" class="secondary">保存订阅源</button><button type="button" id="rss-delete" class="text-button" disabled>删除订阅源</button></div>
+          <p id="rss-saved-message" class="rss-message" role="status">保存后可在本机重复使用；修改同一地址的名称后再保存即可改名。</p>
           <p id="rss-message" class="rss-message" role="status"></p>
           <section id="rss-preview" class="rss-preview" aria-labelledby="rss-source-title" hidden>
             <div class="rss-preview-heading"><div><strong id="rss-source-title"></strong><span id="rss-source-meta" class="rss-source-meta"></span></div><span id="rss-selection-count"></span></div>
