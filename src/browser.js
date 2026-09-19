@@ -11,16 +11,26 @@ export function browserOptions() {
   return {};
 }
 
-export async function makePdf(html) {
+export async function makePdf(html, { signal } = {}) {
+  signal?.throwIfAborted();
   let browser;
   try { browser = await chromium.launch({ ...browserOptions(), headless: true }); }
   catch { throw new Error('PDF 需要 Chromium，请在工具目录运行 npm run setup:browser 后重试'); }
+  let abort;
   try {
+    abort = () => { void browser?.close(); };
+    signal?.addEventListener('abort', abort, { once: true });
+    signal?.throwIfAborted();
     const page = await browser.newPage({ javaScriptEnabled: false });
     await page.route('**/*', route => route.abort());
     await page.setContent(html, { waitUntil: 'load', timeout: 20000 });
-    return await page.pdf({ format: 'A4', printBackground: true, margin: { top: '18mm', bottom: '18mm', left: '16mm', right: '16mm' }, timeout: 30000 });
-  } finally { await browser.close(); }
+    const pdf = await page.pdf({ format: 'A4', printBackground: true, margin: { top: '18mm', bottom: '18mm', left: '16mm', right: '16mm' }, timeout: 30000 });
+    signal?.throwIfAborted();
+    return pdf;
+  } finally {
+    signal?.removeEventListener('abort', abort);
+    await browser.close().catch(() => {});
+  }
 }
 
 export function createVerificationBrowser(dataDir) {

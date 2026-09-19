@@ -28,3 +28,22 @@ test('网络读取拒绝非微信来源、私有地址和伪造域名', async ()
     await assert.rejects(fetchResource(url, 'image'));
   }
 });
+
+test('全部格式失败后重试复用持久化图片，不再次请求网络', async () => {
+  const first = await exportArticle('https://mp.weixin.qq.com/s/test', ['pdf'], {
+    getHtml: async () => html,
+    getImage: async () => ({ bytes: png, mime: 'image/png' }),
+    renderPdf: async () => { throw new Error('PDF 暂时不可用'); }
+  });
+  assert.equal(first.archive, undefined);
+  assert.deepEqual(first.successfulFormats, []);
+  const retried = await exportArticle('https://mp.weixin.qq.com/s/test', ['pdf'], {
+    retryInput: JSON.parse(JSON.stringify(first.retryInput)),
+    getHtml: async () => { throw new Error('不应重新读取正文'); },
+    getImage: async () => { throw new Error('不应重新下载图片'); },
+    renderPdf: async () => Buffer.from('%PDF-重试')
+  });
+  const zip = await JSZip.loadAsync(retried.archive);
+  assert.deepEqual(await zip.file('images/001.png').async('nodebuffer'), png);
+  assert.equal((await zip.file('article.pdf').async('nodebuffer')).subarray(0, 5).toString(), '%PDF-');
+});

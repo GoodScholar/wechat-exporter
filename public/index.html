@@ -14,18 +14,19 @@
         <label class="format"><input type="checkbox" name="format" value="markdown" checked><span class="file-icon">MD</span><span><strong>Markdown</strong><small>用于笔记、知识库和二次编辑</small></span></label>
         <label class="format"><input type="checkbox" name="format" value="html" checked><span class="file-icon">网页</span><span><strong>HTML</strong><small>图片内嵌，双击即可离线阅读</small></span></label>
         <label class="format"><input type="checkbox" name="format" value="pdf"><span class="file-icon">PDF</span><span><strong>PDF</strong><small>A4 排版，便于阅读与打印</small></span></label>
+        <div class="directory-setting"><label for="output-directory">保存目录</label><input id="output-directory" type="text" inputmode="text" autocomplete="off" aria-describedby="directory-help"><p id="directory-help">文章 ZIP 会保存到此处；浏览器下载的副本仍由浏览器决定位置。</p><div class="directory-actions"><button id="save-directory" type="button" class="secondary">保存目录</button><button id="restore-directory" type="button" class="text-button">恢复默认目录</button></div></div>
         <button id="submit" type="submit" class="primary">开始导出 <span aria-hidden="true">↓</span></button>
         <p class="export-note">文件保存在本机，可单篇或批量下载</p>
       </section>
     </form>
     <div id="notice" class="notice" role="status" hidden></div>
     <section class="tasks" aria-labelledby="tasks-title">
-      <div class="tasks-heading"><div><h2 id="tasks-title">导出记录</h2><p id="summary">从第一篇想收藏的文章开始</p></div><div class="task-actions"><label for="history" class="sr-only">选择导出批次</label><select id="history" hidden></select><button type="button" id="retry" class="secondary" hidden>重试失败项</button><a id="download-all" class="secondary" hidden>打包下载</a></div></div>
+      <div class="tasks-heading"><div><h2 id="tasks-title">导出记录</h2><p id="summary">从第一篇想收藏的文章开始</p></div><div class="task-actions"><label for="history" class="sr-only">选择导出批次</label><select id="history" hidden></select><button type="button" id="cancel" class="secondary danger" hidden>取消本批次</button><button type="button" id="retry" class="secondary" hidden>恢复未完成项</button><a id="download-all" class="secondary" hidden>打包下载</a></div></div>
       <progress id="progress" value="0" max="1" hidden aria-label="当前批次导出进度"></progress>
       <div id="batch-info" class="batch-info" hidden></div>
-      <div id="save-location" class="save-location" role="status" hidden><strong>文件已保存到</strong><code id="saved-directory"></code><p>点击「下载 ZIP」或「打包下载」会另存一份，保存位置由浏览器设置或保存对话框决定，可在浏览器下载列表中查看。</p></div>
+      <div id="save-location" class="save-location" role="status" hidden><strong id="save-location-heading">本批次保存目录</strong><code id="saved-directory"></code><div class="location-actions"><button type="button" id="copy-path" class="secondary">复制路径</button><button type="button" id="open-directory" class="secondary">打开文件夹</button></div><p>点击「下载 ZIP」或「打包下载」会由浏览器另存一份，位置由浏览器设置或保存对话框决定；这与上方工具保存的文件夹不同。</p></div>
       <div id="items"><div class="empty"><span class="empty-icon" aria-hidden="true">▤</span><strong>文章导出后，会出现在这里</strong><p>粘贴链接、选择格式，点击「开始导出」即可。</p></div></div>
     </section>
-    <footer class="page-footer"><span>留住内容，让阅读有迹可循。</span><details><summary>导出说明</summary><p>支持可访问的公众号图文文章。Markdown 使用本地图片；HTML 内嵌图片；PDF 采用适合阅读的 A4 排版，不保证与微信原排版完全一致。视频、音频、评论和互动组件不导出。遇到微信验证时，可打开独立浏览器完成验证，保持文章打开，再重试失败项。每篇下载为一个 ZIP，批量下载包含多个文章 ZIP。</p><p>文章和记录保存在工具目录的 .data 文件夹。仅在本机访问；关闭服务不会删除已导出的文件。</p></details></footer>
+    <footer class="page-footer"><span>留住内容，让阅读有迹可循。</span><details><summary>导出说明</summary><p>支持可访问的公众号图文文章。Markdown 使用本地图片；HTML 内嵌图片；PDF 采用适合阅读的 A4 排版，不保证与微信原排版完全一致。视频、音频、评论和互动组件不导出。遇到微信验证时，可打开独立浏览器完成验证，保持文章打开，再重试失败项。每篇下载为一个 ZIP，批量下载包含多个文章 ZIP。</p><p>导出记录保存在工具目录的 .data 文件夹，文章文件保存在所选目录。仅在本机访问；关闭服务不会删除已导出的文件。</p></details></footer>
   </main>
 </body></html>
