@@ -71,8 +71,9 @@ export class JobStore {
     item.successfulFormats ||= item.status === 'success' ? [...job.formats] : [];
     item.failedFormats ||= item.status === 'error' ? Object.fromEntries(job.formats.filter(format => !item.successfulFormats.includes(format)).map(format => [format, item.error || '导出失败'])) : {};
     item.successfulFormats = unique(item.successfulFormats);
-    if (item.status === 'success' && !existsSync(this.file(item, job))) {
+    if (item.successfulFormats.length && !existsSync(this.file(item, job))) {
       item.status = 'error'; item.error = '导出文件已被移除，请重新导出'; item.failedFormats = Object.fromEntries(job.formats.map(format => [format, item.error])); item.successfulFormats = [];
+      delete item.cached;
     }
     item.downloadable = Boolean(item.successfulFormats.length && existsSync(this.file(item, job)));
   }
@@ -101,6 +102,7 @@ export class JobStore {
     const items = itemId ? job.items.filter(item => item.id === itemId) : job.items;
     if (itemId && !items.length) throw new Error('找不到这篇文章');
     for (const item of items) if (['error', 'partial', 'cancelled'].includes(item.status)) {
+      this.normalizeItem(job, item);
       item.retryFormats = job.formats.filter(format => !item.successfulFormats.includes(format));
       if (item.retryFormats.length) { item.status = 'queued'; item.progress = undefined; delete item.error; }
     }
@@ -153,22 +155,26 @@ export class JobStore {
             const previousArchive = this.hasFile(item, job) ? readFileSync(this.file(item, job)) : null;
             const result = await this.exporter(item.url, formats, { signal: controller.signal, retryInput: item.retryInput, previousArchive,
               onProgress: progress => { if (!controller.signal.aborted) { item.progress = progress; this.save(); } } });
-            if (controller.signal.aborted || job.cancelRequested) this.markCancelled(job, item);
+            const cancelled = () => controller.signal.aborted || job.cancelRequested || result.cancelled;
+            // 带有正文缓存的结果包含可恢复的阶段成果；普通导出器的迟到结果仍丢弃。
+            const checkpoint = Boolean(result.retryInput?.article);
+            if (cancelled() && !checkpoint) this.markCancelled(job, item);
             else {
               const successfulFormats = unique([...(item.successfulFormats || []), ...(result.successfulFormats || (result.archive ? formats : []))]);
               const failedFormats = { ...item.failedFormats, ...(result.failedFormats || {}) };
               for (const format of successfulFormats) delete failedFormats[format];
-              if (result.archive && (result.successfulFormats?.length || (!result.successfulFormats && formats.length))) {
-                const archive = await mergeArchives(previousArchive, result.archive, successfulFormats, failedFormats);
-                if (controller.signal.aborted || job.cancelRequested) this.markCancelled(job, item); else this.writeArchive(job, item, archive, result.title || item.title);
-              }
-              if (!controller.signal.aborted && !job.cancelRequested) {
+              const archive = result.archive && (result.successfulFormats?.length || (!result.successfulFormats && formats.length))
+                ? await mergeArchives(previousArchive, result.archive, successfulFormats, failedFormats) : null;
+              if (cancelled() && !checkpoint) this.markCancelled(job, item);
+              else {
+                if (archive) this.writeArchive(job, item, archive, result.title || item.title);
                 Object.assign(item, result, { successfulFormats, failedFormats, retryInput: result.retryInput || item.retryInput, progress: undefined });
-                delete item.archive; delete item.retryFormats;
+                delete item.archive; delete item.retryFormats; delete item.cancelled;
                 item.downloadable = Boolean(successfulFormats.length && existsSync(this.file(item, job)));
                 item.status = successfulFormats.length === job.formats.length ? 'success' : successfulFormats.length ? 'partial' : 'error';
                 if (item.status === 'error') item.error = Object.values(failedFormats)[0] || '导出失败'; else delete item.error;
-                if (item.status === 'success') delete item.retryInput;
+                if (cancelled() && item.status !== 'success') this.markCancelled(job, item);
+                else if (item.status === 'success') delete item.retryInput;
               }
             }
           }

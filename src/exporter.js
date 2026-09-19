@@ -128,15 +128,25 @@ export async function exportArticle(url, formats, options = {}) {
     return renderHtml(copy);
   };
   let html;
+  let cancelled = false;
   for (const format of formats) {
     try {
       progress({ stage: 'format', format });
       if (format === 'markdown') zip.file('article.md', renderMarkdown(article));
       if (format === 'html') { html ||= htmlForExport(); zip.file('article.html', html); }
-      if (format === 'pdf') { html ||= htmlForExport(); zip.file('article.pdf', await renderPdf(html, { signal })); }
+      if (format === 'pdf') {
+        html ||= htmlForExport();
+        const pdf = await renderPdf(html, { signal });
+        signal?.throwIfAborted();
+        zip.file('article.pdf', pdf);
+      }
       successfulFormats.push(format);
     } catch (error) {
-      if (signal?.aborted || error?.name === 'AbortError') throw error;
+      if (signal?.aborted || error?.name === 'AbortError') {
+        cancelled = true;
+        for (const pending of formats.filter(value => !successfulFormats.includes(value))) failedFormats[pending] ||= '已取消';
+        break;
+      }
       failedFormats[format] = error.message || `${format} 导出失败`;
     }
   }
@@ -144,13 +154,15 @@ export async function exportArticle(url, formats, options = {}) {
   if (successfulFormats.length) {
     zip.file('metadata.json', JSON.stringify({ ...metadata, successfulFormats, failedFormats }, null, 2));
   }
-  progress({ stage: 'archive' });
+  if (!cancelled && !signal?.aborted) progress({ stage: 'archive' });
+  const archive = successfulFormats.length ? await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) : undefined;
   return {
     ...metadata,
     imageCount: index,
     successfulFormats,
     failedFormats,
     retryInput: { article, images: Object.fromEntries([...images.entries()].filter(([name]) => name.startsWith('images/'))) },
-    archive: successfulFormats.length ? await zip.generateAsync({ type: 'nodebuffer', compression: 'DEFLATE' }) : undefined
+    archive,
+    cancelled: cancelled || Boolean(signal?.aborted)
   };
 }
