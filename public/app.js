@@ -257,7 +257,7 @@ async function retry(itemId) {
 $('#export-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (submitting) return;
-  const text = inputMode === 'rss' ? [...rssSelected].join('\n') : $('#links').value;
+  const text = inputMode === 'rss' ? rssItems.filter(item => rssSelected.has(item.url)).map(item => item.url).join('\n') : $('#links').value;
   if (inputMode === 'rss' && !rssSelected.size) { notify('请至少选择一篇 RSS 文章。', true); return; }
   submitting = true;
   render();
