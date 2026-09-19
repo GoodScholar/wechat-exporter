@@ -1,0 +1,31 @@
+{
+  "name": "wechat-exporter",
+  "version": "1.0.0",
+  "description": "在本机浏览器中导出微信公众号文章为 Markdown、HTML 和 PDF。",
+  "private": true,
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/GoodScholar/wechat-exporter.git"
+  },
+  "bugs": {
+    "url": "https://github.com/GoodScholar/wechat-exporter/issues"
+  },
+  "homepage": "https://github.com/GoodScholar/wechat-exporter#readme",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test test/*.test.js",
+    "setup:browser": "playwright install chromium"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "express": "^5.1.0",
+    "jszip": "^3.10.1",
+    "playwright": "^1.58.2",
+    "sanitize-html": "^2.17.0",
+    "turndown": "^7.2.2",
+    "turndown-plugin-gfm": "^1.0.2"
+  }
+}

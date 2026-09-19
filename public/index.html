@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>留篇 · 公众号文章导出</title><link rel="icon" href="data:,"><link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script></head>
+<body>
+  <header class="topbar"><a class="brand" href="/"><span class="brand-icon" aria-hidden="true">留</span><strong>留篇</strong><span class="brand-caption">公众号文章导出</span></a><span class="local-badge"><i></i> 本机运行</span></header>
+  <main>
+    <section class="intro"><div><h1>把好文章，留在手边。</h1><p>粘贴公众号文章链接，连同图片一起保存，随时离线阅读。</p></div><div class="paper-stack" aria-hidden="true"><div class="paper-back"></div><div class="paper-front"><span></span><i></i><i></i><i></i><b>↓</b></div></div></section>
+    <form id="export-form" class="workspace">
+      <section class="input-panel"><div class="section-heading"><label for="links">文章链接</label><button type="button" id="clear" class="text-button">清空</button></div>
+        <textarea id="links" name="links" spellcheck="false" placeholder="https://mp.weixin.qq.com/s/…&#10;&#10;每行一篇，也可以直接粘贴包含链接的分享文字。" aria-describedby="input-help"></textarea>
+        <div class="input-footer"><span id="input-help">支持短链接、完整长链接，每批最多 50 篇</span><span id="link-count">尚未添加链接</span></div>
+      </section>
+      <section class="options-panel"><h2>保存为什么格式</h2><p class="section-description">可多选，图片会自动保存</p>
+        <label class="format"><input type="checkbox" name="format" value="markdown" checked><span class="file-icon">MD</span><span><strong>Markdown</strong><small>用于笔记、知识库和二次编辑</small></span></label>
+        <label class="format"><input type="checkbox" name="format" value="html" checked><span class="file-icon">网页</span><span><strong>HTML</strong><small>图片内嵌，双击即可离线阅读</small></span></label>
+        <label class="format"><input type="checkbox" name="format" value="pdf"><span class="file-icon">PDF</span><span><strong>PDF</strong><small>A4 排版，便于阅读与打印</small></span></label>
+        <button id="submit" type="submit" class="primary">开始导出 <span aria-hidden="true">↓</span></button>
+        <p class="export-note">文件保存在本机，可单篇或批量下载</p>
+      </section>
+    </form>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="tasks" aria-labelledby="tasks-title">
+      <div class="tasks-heading"><div><h2 id="tasks-title">导出记录</h2><p id="summary">从第一篇想收藏的文章开始</p></div><div class="task-actions"><label for="history" class="sr-only">选择导出批次</label><select id="history" hidden></select><button type="button" id="retry" class="secondary" hidden>重试失败项</button><a id="download-all" class="secondary" hidden>打包下载</a></div></div>
+      <progress id="progress" value="0" max="1" hidden aria-label="当前批次导出进度"></progress>
+      <div id="batch-info" class="batch-info" hidden></div>
+      <div id="save-location" class="save-location" role="status" hidden><strong>文件已保存到</strong><code id="saved-directory"></code><p>点击「下载 ZIP」或「打包下载」会另存一份，保存位置由浏览器设置或保存对话框决定，可在浏览器下载列表中查看。</p></div>
+      <div id="items"><div class="empty"><span class="empty-icon" aria-hidden="true">▤</span><strong>文章导出后，会出现在这里</strong><p>粘贴链接、选择格式，点击「开始导出」即可。</p></div></div>
+    </section>
+    <footer class="page-footer"><span>留住内容，让阅读有迹可循。</span><details><summary>导出说明</summary><p>支持可访问的公众号图文文章。Markdown 使用本地图片；HTML 内嵌图片；PDF 采用适合阅读的 A4 排版，不保证与微信原排版完全一致。视频、音频、评论和互动组件不导出。遇到微信验证时，可打开独立浏览器完成验证，保持文章打开，再重试失败项。每篇下载为一个 ZIP，批量下载包含多个文章 ZIP。</p><p>文章和记录保存在工具目录的 .data 文件夹。仅在本机访问；关闭服务不会删除已导出的文件。</p></details></footer>
+  </main>
+</body></html>
