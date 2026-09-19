@@ -6,6 +6,12 @@ let selectedId;
 let lastSnapshot;
 let submitting = false;
 let settingsLoaded = false;
+let inputMode = 'links';
+let rssItems = [];
+let rssSelected = new Set();
+let rssPreviewUrl = '';
+let rssLoading = false;
+let rssRequest = 0;
 
 function notify(message, error = false) {
   $('#notice').textContent = message;
@@ -50,9 +56,141 @@ function inputCount() {
 $('#links').addEventListener('input', inputCount);
 $('#clear').addEventListener('click', () => { $('#links').value = ''; inputCount(); $('#links').focus(); });
 
+function localDate(value) {
+  if (!value) return '';
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return '';
+  const pad = number => String(number).padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`;
+}
+
+function visibleRssItems() {
+  const keyword = $('#rss-title-filter').value.trim().toLocaleLowerCase();
+  const start = $('#rss-start-date').value;
+  const end = $('#rss-end-date').value;
+  return rssItems.filter(item => {
+    const date = localDate(item.publishedAt);
+    return (!keyword || String(item.title || '').toLocaleLowerCase().includes(keyword))
+      && (!start || (date && date >= start))
+      && (!end || (date && date <= end));
+  });
+}
+
+function rssMessage(message, error = false) {
+  $('#rss-message').textContent = message;
+  $('#rss-message').className = 'rss-message' + (error ? ' error' : '');
+}
+
+function clearRssPreview() {
+  rssItems = [];
+  rssSelected.clear();
+  rssPreviewUrl = '';
+  $('#rss-preview').hidden = true;
+  render();
+}
+
+function renderRss() {
+  if (!rssItems.length) {
+    $('#rss-preview').hidden = true;
+    return;
+  }
+  const visible = visibleRssItems();
+  const visibleUrls = new Set(visible.map(item => item.url));
+  rssSelected = new Set([...rssSelected].filter(url => visibleUrls.has(url)));
+  $('#rss-preview').hidden = false;
+  $('#rss-selection-count').textContent = `当前可见 ${visible.length} 篇 · 已选 ${rssSelected.size} 篇`;
+  $('#rss-list').innerHTML = visible.length ? visible.map(item => {
+    const date = localDate(item.publishedAt);
+    const meta = [date, item.author].filter(Boolean).join(' · ');
+    return `<label class="rss-item"><input type="checkbox" data-url="${escape(item.url)}" ${rssSelected.has(item.url) ? 'checked' : ''}><span><strong>${escape(item.title || '微信公众号文章')}</strong>${meta ? `<small>${escape(meta)}</small>` : '<small>未提供日期</small>'}</span><a href="${escape(item.url)}" target="_blank" rel="noreferrer" aria-label="打开原文">原文</a></label>`;
+  }).join('') : '<p class="rss-empty">当前筛选没有文章。</p>';
+}
+
+function setInputMode(mode) {
+  inputMode = mode;
+  const rss = mode === 'rss';
+  $('#links-panel').hidden = rss;
+  $('#rss-panel').hidden = !rss;
+  $('#clear').hidden = rss;
+  $('#input-mode-links').classList.toggle('active', !rss);
+  $('#input-mode-links').setAttribute('aria-pressed', String(!rss));
+  $('#input-mode-rss').classList.toggle('active', rss);
+  $('#input-mode-rss').setAttribute('aria-pressed', String(rss));
+  if (rss) renderRss();
+  render();
+}
+
+async function loadRss() {
+  const url = $('#rss-url').value.trim();
+  if (!url) { rssMessage('请先填写 RSS 地址。', true); return; }
+  const requestId = ++rssRequest;
+  clearRssPreview();
+  rssLoading = true;
+  $('#rss-load').disabled = true;
+  rssMessage('正在读取文章…');
+  render();
+  try {
+    const result = await api('/api/feeds/preview', { url });
+    if (requestId !== rssRequest || $('#rss-url').value.trim() !== url) return;
+    rssItems = result.items || [];
+    rssPreviewUrl = url;
+    $('#rss-source-title').textContent = result.title || 'RSS 文章';
+    $('#rss-source-meta').textContent = result.url || url;
+    const hints = [];
+    if (!rssItems.length) hints.push('源中没有可导入的微信原文，请检查订阅服务设置（we-mp-rss 请使用 RSS_LOCAL=false）。');
+    else hints.push(`已读取 ${rssItems.length} 篇微信文章。`);
+    if (result.skipped) hints.push(`已跳过 ${result.skipped} 个非微信或无效条目。`);
+    if (result.duplicates) hints.push(`已合并 ${result.duplicates} 个重复条目。`);
+    if (result.truncated) hints.push('源条目较多，仅显示前 500 篇。');
+    rssMessage(hints.join(' '));
+    renderRss();
+  } catch (error) {
+    if (requestId === rssRequest) rssMessage(`读取失败：${error.message}`, true);
+  } finally {
+    if (requestId === rssRequest) {
+      rssLoading = false;
+      $('#rss-load').disabled = false;
+      render();
+    }
+  }
+}
+
+$('#input-mode-links').addEventListener('click', () => setInputMode('links'));
+$('#input-mode-rss').addEventListener('click', () => setInputMode('rss'));
+$('#rss-load').addEventListener('click', loadRss);
+$('#rss-url').addEventListener('input', () => {
+  if (rssPreviewUrl || rssLoading) {
+    rssRequest += 1;
+    rssLoading = false;
+    $('#rss-load').disabled = false;
+    clearRssPreview();
+    rssMessage('RSS 地址已变化，请重新读取文章。');
+  }
+});
+['#rss-title-filter', '#rss-start-date', '#rss-end-date'].forEach(selector => $(selector).addEventListener('input', () => { renderRss(); render(); }));
+$('#rss-select-all').addEventListener('click', () => {
+  const visible = visibleRssItems();
+  rssSelected = new Set(visible.slice(0, 50).map(item => item.url));
+  if (visible.length > 50) rssMessage('当前筛选结果超过 50 篇，已选择前 50 篇。');
+  renderRss();
+  render();
+});
+$('#rss-clear-selection').addEventListener('click', () => { rssSelected.clear(); renderRss(); render(); });
+$('#rss-list').addEventListener('change', event => {
+  const input = event.target.closest('input[type="checkbox"][data-url]');
+  if (!input) return;
+  if (input.checked && rssSelected.size >= 50) {
+    input.checked = false;
+    rssMessage('每批最多选择 50 篇文章。', true);
+  } else if (input.checked) rssSelected.add(input.dataset.url);
+  else rssSelected.delete(input.dataset.url);
+  renderRss();
+  render();
+});
+
 function render() {
   const active = jobs.some(job => job.items.some(item => ['running', 'queued'].includes(item.status)));
-  $('#submit').disabled = submitting || active;
+  $('#submit').disabled = submitting || active || (inputMode === 'rss' && (rssLoading || rssSelected.size === 0));
   $('#submit').innerHTML = active ? '正在导出，请稍候' : '开始导出 <span aria-hidden="true">↓</span>';
   const job = jobs.find(job => job.id === selectedId) || jobs[0];
   if (!job) return;
@@ -119,11 +257,13 @@ async function retry(itemId) {
 $('#export-form').addEventListener('submit', async event => {
   event.preventDefault();
   if (submitting) return;
+  const text = inputMode === 'rss' ? [...rssSelected].join('\n') : $('#links').value;
+  if (inputMode === 'rss' && !rssSelected.size) { notify('请至少选择一篇 RSS 文章。', true); return; }
   submitting = true;
   render();
   try {
     const formats = [...document.querySelectorAll('input[name="format"]:checked')].map(input => input.value);
-    const job = await api('/api/jobs', { text: $('#links').value, formats });
+    const job = await api('/api/jobs', { text, formats });
     selectedId = job.id;
     $('#notice').hidden = true;
     await refresh();

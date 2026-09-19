@@ -7,8 +7,20 @@
     <section class="intro"><div><h1>把好文章，留在手边。</h1><p>粘贴公众号文章链接，连同图片一起保存，随时离线阅读。</p></div><div class="paper-stack" aria-hidden="true"><div class="paper-back"></div><div class="paper-front"><span></span><i></i><i></i><i></i><b>↓</b></div></div></section>
     <form id="export-form" class="workspace">
       <section class="input-panel"><div class="section-heading"><label for="links">文章链接</label><button type="button" id="clear" class="text-button">清空</button></div>
-        <textarea id="links" name="links" spellcheck="false" placeholder="https://mp.weixin.qq.com/s/…&#10;&#10;每行一篇，也可以直接粘贴包含链接的分享文字。" aria-describedby="input-help"></textarea>
-        <div class="input-footer"><span id="input-help">支持短链接、完整长链接，每批最多 50 篇</span><span id="link-count">尚未添加链接</span></div>
+        <div class="input-mode" role="group" aria-label="导入方式"><button type="button" id="input-mode-links" class="mode-button active" aria-pressed="true">粘贴链接</button><button type="button" id="input-mode-rss" class="mode-button" aria-pressed="false">RSS 导入</button></div>
+        <div id="links-panel"><textarea id="links" name="links" spellcheck="false" placeholder="https://mp.weixin.qq.com/s/…&#10;&#10;每行一篇，也可以直接粘贴包含链接的分享文字。" aria-describedby="input-help"></textarea>
+          <div class="input-footer"><span id="input-help">支持短链接、完整长链接，每批最多 50 篇</span><span id="link-count">尚未添加链接</span></div></div>
+        <div id="rss-panel" hidden>
+          <p class="rss-help">填写文章 RSS 地址，支持本机订阅服务。使用 we-mp-rss 时请关闭本地链接（<code>RSS_LOCAL=false</code>）；需要已有订阅服务。</p>
+          <div class="rss-load"><label for="rss-url">RSS 地址</label><input id="rss-url" type="text" inputmode="url" autocomplete="off" placeholder="http://127.0.0.1:1200/feed.xml"><button type="button" id="rss-load" class="secondary">读取文章</button></div>
+          <p id="rss-message" class="rss-message" role="status"></p>
+          <section id="rss-preview" class="rss-preview" aria-labelledby="rss-source-title" hidden>
+            <div class="rss-preview-heading"><div><strong id="rss-source-title"></strong><span id="rss-source-meta" class="rss-source-meta"></span></div><span id="rss-selection-count"></span></div>
+            <div class="rss-filters"><label>标题关键字<input id="rss-title-filter" type="search" autocomplete="off"></label><label>开始日期<input id="rss-start-date" type="date"></label><label>结束日期<input id="rss-end-date" type="date"></label></div>
+            <div class="rss-actions"><button type="button" id="rss-select-all" class="secondary">全选当前筛选结果</button><button type="button" id="rss-clear-selection" class="text-button">清空选择</button></div>
+            <div id="rss-list" class="rss-list" aria-live="polite"></div>
+          </section>
+        </div>
       </section>
       <section class="options-panel"><h2>保存为什么格式</h2><p class="section-description">可多选，图片会自动保存</p>
         <label class="format"><input type="checkbox" name="format" value="markdown" checked><span class="file-icon">MD</span><span><strong>Markdown</strong><small>用于笔记、知识库和二次编辑</small></span></label>

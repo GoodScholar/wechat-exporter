@@ -7,6 +7,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 import { JobStore } from './jobs.js';
 import { exportArticle, fetchResource } from './exporter.js';
 import { createVerificationBrowser } from './browser.js';
+import { fetchFeed } from './feeds.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
@@ -46,6 +47,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     res.json({ message: '已打开保存目录' });
   });
   app.get('/api/jobs', (req, res) => res.json(store.list()));
+  app.post('/api/feeds/preview', async (req, res) => res.json(await fetchFeed(req.body.url)));
   app.post('/api/jobs', (req, res) => {
     const job = store.create(req.body.text, req.body.formats);
     res.status(201).json(store.publicJob(job));
