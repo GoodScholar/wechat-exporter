@@ -163,6 +163,7 @@ export async function exportArticle(url, formats, options = {}) {
     failedFormats,
     retryInput: { article, images: Object.fromEntries([...images.entries()].filter(([name]) => name.startsWith('images/'))) },
     archive,
+    resumable: true,
     cancelled: cancelled || Boolean(signal?.aborted)
   };
 }

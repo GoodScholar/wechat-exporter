@@ -106,3 +106,28 @@ test('跨重启重试全失败 PDF 时保留图片输入，并支持默认目录
     assert.ok(Buffer.byteLength(path.basename(restored.file(restored.findItem(item.id).item, restored.findItem(item.id).job))) < 255);
   } finally { await rm(dir, { recursive: true, force: true }); }
 });
+
+test('旧式导出器取消后的阶段成果仍可下载，内部恢复标记不进入公开记录', async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), 'wechat-legacy-checkpoint-'));
+  let release;
+  try {
+    const zip = new JSZip();
+    zip.file('article.html', '<p>已完成的正文</p>');
+    const archive = await zip.generateAsync({ type: 'nodebuffer' });
+    const store = new JobStore(dir, () => new Promise(resolve => {
+      release = () => resolve({ title: '旧式阶段成果', warnings: [], archive, successfulFormats: ['html'], failedFormats: { pdf: '已取消' }, retryInput: { article: { title: '旧式阶段成果' } } });
+    }), 0);
+    const job = store.create('https://mp.weixin.qq.com/s/legacy-checkpoint', ['html', 'pdf']);
+    store.cancel(job.id);
+    release();
+    await settled(store);
+    const item = store.list()[0].items[0];
+    assert.equal(item.status, 'cancelled');
+    assert.equal(item.downloadable, true);
+    assert.deepEqual(item.successfulFormats, ['html']);
+    assert.equal('retryInput' in item, false);
+    assert.equal('resumable' in item, false);
+    const exported = await JSZip.loadAsync(await readFile(store.file(item, job)));
+    assert.match(await exported.file('article.html').async('string'), /已完成的正文/);
+  } finally { await rm(dir, { recursive: true, force: true }); }
+});
