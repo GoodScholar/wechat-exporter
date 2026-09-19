@@ -34,7 +34,7 @@ async function api(url, body) {
 }
 
 function itemWarnings(item) { return item.warnings || []; }
-function isDownloadable(item) { return item.downloadable === true || item.status === 'success'; }
+function isDownloadable(item) { return item.downloadable === true; }
 function progressText(progress) {
   if (!progress) return '';
   if (progress.stage === 'fetch') return '正在读取文章正文';

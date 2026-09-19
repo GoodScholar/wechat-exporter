@@ -71,11 +71,17 @@ export class JobStore {
     item.successfulFormats ||= item.status === 'success' ? [...job.formats] : [];
     item.failedFormats ||= item.status === 'error' ? Object.fromEntries(job.formats.filter(format => !item.successfulFormats.includes(format)).map(format => [format, item.error || '导出失败'])) : {};
     item.successfulFormats = unique(item.successfulFormats);
-    if (item.successfulFormats.length && !existsSync(this.file(item, job))) {
+    this.refreshArchive(job, item);
+  }
+
+  refreshArchive(job, item) {
+    if (['queued', 'running'].includes(item.status)) return;
+    const exists = existsSync(this.file(item, job));
+    if (item.successfulFormats.length && !exists) {
       item.status = 'error'; item.error = '导出文件已被移除，请重新导出'; item.failedFormats = Object.fromEntries(job.formats.map(format => [format, item.error])); item.successfulFormats = [];
       delete item.cached;
     }
-    item.downloadable = Boolean(item.successfulFormats.length && existsSync(this.file(item, job)));
+    item.downloadable = Boolean(item.successfulFormats.length && exists);
   }
 
   save() { writeFileSync(this.manifest + '.tmp', JSON.stringify(this.jobs, null, 2)); renameSync(this.manifest + '.tmp', this.manifest); }
@@ -83,7 +89,10 @@ export class JobStore {
   findJob(id) { return this.jobs.find(job => job.id === id); }
   findItem(id) { return this.jobs.flatMap(job => job.items.map(item => ({ job, item }))).find(entry => entry.item.id === id); }
   hasFile(item, job) { return Boolean(item.downloadable && existsSync(this.file(item, job))); }
-  list() { return this.jobs.map(({ cancelRequested, ...job }) => ({ ...job, items: job.items.map(({ retryInput, retryFormats, ...item }) => ({ ...item })) })); }
+  list() {
+    for (const job of this.jobs) for (const item of job.items) this.refreshArchive(job, item);
+    return this.jobs.map(({ cancelRequested, ...job }) => ({ ...job, items: job.items.map(({ retryInput, retryFormats, ...item }) => ({ ...item })) }));
+  }
   publicJob(job) { return this.list().find(candidate => candidate.id === job.id); }
 
   create(text, formats) {
@@ -101,10 +110,12 @@ export class JobStore {
     if (!job) throw new Error('找不到这个批次');
     const items = itemId ? job.items.filter(item => item.id === itemId) : job.items;
     if (itemId && !items.length) throw new Error('找不到这篇文章');
-    for (const item of items) if (['error', 'partial', 'cancelled'].includes(item.status)) {
-      this.normalizeItem(job, item);
-      item.retryFormats = job.formats.filter(format => !item.successfulFormats.includes(format));
-      if (item.retryFormats.length) { item.status = 'queued'; item.progress = undefined; delete item.error; }
+    for (const item of items) {
+      this.refreshArchive(job, item);
+      if (['error', 'partial', 'cancelled'].includes(item.status)) {
+        item.retryFormats = job.formats.filter(format => !item.successfulFormats.includes(format));
+        if (item.retryFormats.length) { item.status = 'queued'; item.progress = undefined; delete item.error; }
+      }
     }
     delete job.cancelRequested;
     this.save(); void this.run(); return job;
