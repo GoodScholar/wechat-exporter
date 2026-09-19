@@ -95,6 +95,7 @@ export async function exportArticle(url, formats, options = {}) {
           const { bytes, mime } = await getImage(source, { signal });
           signal?.throwIfAborted();
           if (!types[mime]) throw new Error('不支持的图片格式');
+          if (bytesUsed + bytes.length > 60 * 1024 * 1024) throw new Error('达到单篇图片下载限制');
           bytesUsed += bytes.length;
           const filename = `images/${String(++index).padStart(3, '0')}.${types[mime]}`;
           zip.file(filename, bytes);
