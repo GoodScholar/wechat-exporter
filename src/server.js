@@ -10,9 +10,12 @@ import { createVerificationBrowser } from './browser.js';
 import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
 import { TypesettingStore, renderTypesettingMarkdown } from './typesetting.js';
+import { importTypesettingDocument, TypesettingImportError } from './typesetting-import.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
+const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
+const typesettingContentSecurityPolicy = contentSecurityPolicy.replace("img-src 'self' data:", "img-src 'self' data: https:");
 
 function openWithSystem(directory) {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
@@ -23,23 +26,25 @@ function openWithSystem(directory) {
   });
 }
 
-export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore } = {}) {
+export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle } = {}) {
   const app = express();
   const verification = createVerificationBrowser(dataDir);
+  const getArticleHtml = async (articleUrl, { signal } = {}) => await verification.read(articleUrl) || (await fetchResource(articleUrl, 'article', { signal })).bytes.toString('utf8');
   const store = new JobStore(dataDir, exporter || ((url, formats, context) => exportArticle(url, formats, {
     ...context,
-    getHtml: async (articleUrl, { signal } = {}) => await verification.read(articleUrl) || (await fetchResource(articleUrl, 'article', { signal })).bytes.toString('utf8')
+    getHtml: getArticleHtml
   })), interval);
   app.locals.store = store;
   const savedFeeds = new SavedFeeds(dataDir);
   const typesetting = typesettingStore || new TypesettingStore(dataDir);
+  const readArticle = fetchArticle || getArticleHtml;
   app.locals.verification = verification;
   app.locals.typesetting = typesetting;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '仅允许本机访问' });
     if (req.method !== 'GET' && (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` || !req.is('application/json'))) return res.status(403).json({ error: '请求来源或格式不正确' });
-    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'" });
+    res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': contentSecurityPolicy });
     next();
   });
   app.use(express.json({ limit: '150kb' }));
@@ -49,6 +54,15 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     catch (error) {
       if (error.status === 400 || error.status === 409) return res.status(error.status).json({ error: error.message });
       return res.status(500).json({ error: '无法保存文稿，请检查本机数据目录后重试' });
+    }
+  });
+  app.post('/api/typesetting/import', async (req, res, next) => {
+    try {
+      const document = await importTypesettingDocument({ typesetting, fetchArticle: readArticle, url: req.body?.url, revision: req.body?.revision, confirmed: req.body?.confirmed });
+      res.json({ document });
+    } catch (error) {
+      if (error instanceof TypesettingImportError) return res.status(error.status).json({ error: error.toJSON() });
+      next(error);
     }
   });
   app.post('/api/typesetting/render', (req, res) => {
@@ -104,7 +118,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     res.on('close', () => stream.destroy());
     stream.pipe(res);
   });
-  app.get('/typesetting', (req, res) => res.sendFile('typesetting.html', { root: path.join(root, 'public') }));
+  app.get('/typesetting', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.sendFile('typesetting.html', { root: path.join(root, 'public') }); });
   app.use(express.static(path.join(root, 'public')));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);

@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sanitizeHtml from 'sanitize-html';
 import { marked } from 'marked';
@@ -33,16 +33,30 @@ async function writeAtomically(file, text) {
 }
 
 export class TypesettingStore {
-  constructor(dataDir) {
+  constructor(dataDir, { writeAtomically: replaceFile = writeAtomically, removeFile = unlink } = {}) {
     this.dataDir = dataDir;
     this.file = path.join(dataDir, 'typesetting-document.json');
     this.backup = path.join(dataDir, 'typesetting-document.backup.json');
+    this.manifest = path.join(dataDir, 'typesetting-document.manifest.json');
+    this.versions = path.join(dataDir, 'typesetting-versions');
     this.document = null;
     this.writes = Promise.resolve();
+    this.replaceFile = replaceFile;
+    this.removeFile = removeFile;
   }
 
   async load() {
     if (this.document) return this.document;
+    try {
+      const manifest = JSON.parse(await readFile(this.manifest, 'utf8'));
+      for (const versionId of [manifest.current, manifest.recovery]) {
+        if (typeof versionId !== 'string') continue;
+        try {
+          this.document = normalizeDocument(JSON.parse(await readFile(path.join(this.versions, `${versionId}.json`), 'utf8')));
+          return this.document;
+        } catch { /* Try the recovery version before legacy files. */ }
+      }
+    } catch { /* Legacy documents have no manifest. */ }
     for (const file of [this.file, this.backup]) {
       try {
         this.document = normalizeDocument(JSON.parse(await readFile(file, 'utf8')));
@@ -66,10 +80,17 @@ export class TypesettingStore {
       if (next.revision === current.revision) return current;
       next.savedAt = new Date().toISOString();
       const serialized = JSON.stringify(next, null, 2);
-      await mkdir(this.dataDir, { recursive: true });
-      await writeAtomically(this.file, serialized);
-      await writeAtomically(this.backup, serialized);
+      const currentId = randomUUID();
+      const recoveryId = randomUUID();
+      await mkdir(this.versions, { recursive: true });
+      await this.replaceFile(path.join(this.versions, `${currentId}.json`), serialized);
+      await this.replaceFile(path.join(this.versions, `${recoveryId}.json`), serialized);
+      await this.replaceFile(this.manifest, JSON.stringify({ current: currentId, recovery: recoveryId }, null, 2));
       this.document = next;
+      try {
+        const keep = new Set([currentId, recoveryId]);
+        for (const name of await readdir(this.versions)) if (name.endsWith('.json') && !keep.has(name.slice(0, -5))) await this.removeFile(path.join(this.versions, name));
+      } catch { /* Cleanup is post-commit and never changes the visible manifest. */ }
       return next;
     };
     const result = this.writes.then(operation, operation);
