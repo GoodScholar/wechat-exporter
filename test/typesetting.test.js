@@ -233,3 +233,123 @@ test('自动保存遇到慢响应时，最新输入仍会成为已保存文稿',
     assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '第二版');
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
+
+async function dispatchPaste(page, { html = '', text = '' }) {
+  return await page.evaluate(({ html, text }) => {
+    const clipboard = new DataTransfer();
+    if (text) clipboard.setData('text/plain', text);
+    if (html) clipboard.setData('text/html', html);
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard });
+    const body = document.querySelector('#document-body');
+    body.dispatchEvent(event);
+    if (!event.defaultPrevented && text) {
+      body.setRangeText(text, body.selectionStart, body.selectionEnd, 'end');
+      body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: text }));
+    }
+    return { defaultPrevented: event.defaultPrevented, value: body.value };
+  }, { html, text });
+}
+
+test('纯文本粘贴保持原生路径；富文本确认后按触发选区插入并自动保存', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-ui-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.route('https://example.test/**', route => route.abort());
+    let conversionRequests = 0;
+    await page.route('**/api/typesetting/rich-text', async route => { conversionRequests++; await route.continue(); });
+
+    const plainPaste = await dispatchPaste(page, { text: '纯文本' });
+    assert.equal(plainPaste.defaultPrevented, false, '纯文本必须不阻止浏览器原生粘贴');
+    assert.equal(plainPaste.value, '纯文本', '合成事件的原生默认插入等价路径应更新正文');
+    assert.equal(conversionRequests, 0, '纯文本不得请求转换 API');
+
+    await page.getByLabel('标题').fill('原有标题');
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    const before = await (await fetch(server.base + '/api/typesetting/document')).json();
+    const previewBefore = await page.locator('#preview').innerHTML();
+    await page.evaluate(() => { window.confirm = () => false; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    assert.equal((await dispatchPaste(page, { html: '<strong>取消内容</strong>' })).defaultPrevented, true);
+    await page.waitForTimeout(100);
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
+    assert.equal(await page.locator('#preview').innerHTML(), previewBefore);
+    assert.deepEqual(await (await fetch(server.base + '/api/typesetting/document')).json(), before);
+    assert.equal(conversionRequests, 0, '取消不得请求转换 API');
+
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    assert.equal((await dispatchPaste(page, { html: '<strong>粗体</strong><video src="https://example.test/video.mp4"></video>' })).defaultPrevented, true);
+    await page.waitForFunction(() => document.querySelector('#document-body').value.includes('**粗体**') && document.querySelector('#document-body').value.includes('特殊内容：视频'));
+    assert.match(await page.getByLabel('Markdown 正文').inputValue(), /^甲[\s\S]*粗体[\s\S]*特殊内容：视频[\s\S]*丙$/);
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.getByText('粗体', { exact: true }).waitFor();
+    await page.getByText('特殊内容：视频', { exact: false }).waitFor();
+    const saved = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    assert.equal(saved.title, '原有标题');
+    assert.match(saved.body, /\*\*粗体\*\*/);
+    assert.match(saved.body, /特殊内容：视频/);
+    assert.equal(conversionRequests, 1);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本转换失败或旧响应到达时不修改当前文稿', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-race-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('失败前正文');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    const before = await (await fetch(server.base + '/api/typesetting/document')).json();
+    const previewBefore = await page.locator('#preview').innerHTML();
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 3); });
+    await page.route('**/api/typesetting/rich-text', route => route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: { code: 'EMPTY_RICH_TEXT', message: '富文本中没有可转换的可读内容。', action: '请保留正文文字后重试。' } }) }));
+    assert.equal((await dispatchPaste(page, { html: '<p>不会插入</p>' })).defaultPrevented, true);
+    await page.getByText('请保留正文文字后重试。', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '失败前正文');
+    assert.equal(await page.locator('#preview').innerHTML(), previewBefore);
+    assert.deepEqual(await (await fetch(server.base + '/api/typesetting/document')).json(), before);
+    await page.unroute('**/api/typesetting/rich-text');
+
+    let release;
+    let requestReached;
+    const responseHeld = new Promise(resolve => { release = resolve; });
+    const reached = new Promise(resolve => { requestReached = resolve; });
+    await page.route('**/api/typesetting/rich-text', async route => {
+      requestReached();
+      const response = await route.fetch();
+      await responseHeld;
+      await route.fulfill({ response });
+    });
+    await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 3));
+    assert.equal((await dispatchPaste(page, { html: '<strong>旧结果</strong>' })).defaultPrevented, true);
+    await reached;
+    await page.getByLabel('Markdown 正文').fill('用户的新编辑');
+    release();
+    await page.getByText('正文或选区已变化，请重新粘贴后重试。', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '用户的新编辑');
+    assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '失败前正文');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('块级富文本插入行内选区时保留 Markdown 与预览的块边界', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-block-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    assert.equal((await dispatchPaste(page, { html: '<h1>插入标题</h1>' })).defaultPrevented, true);
+    await page.getByRole('heading', { name: '插入标题' }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲\n\n# 插入标题\n\n丙');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});

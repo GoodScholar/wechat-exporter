@@ -1,0 +1,120 @@
+import { load } from 'cheerio';
+import sanitizeHtml from 'sanitize-html';
+import TurndownService from 'turndown';
+import { gfm } from 'turndown-plugin-gfm';
+
+const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+markdown.use(gfm);
+markdown.addRule('block-container', {
+  filter: ['div', 'section', 'article', 'main', 'header', 'footer'],
+  replacement: content => `\n\n${content}\n\n`
+});
+
+export const specialContentTypes = [
+  { type: 'video', label: '视频', selector: 'video, mp-common-videosnap, [data-type="video"]' },
+  { type: 'audio', label: '音频', selector: 'audio, mpvoice, qqmusic, mp-common-mpaudio, [data-type="audio"]' },
+  { type: 'embed', label: '嵌入内容', selector: 'iframe, embed, object' },
+  { type: 'mini-program', label: '小程序卡片', selector: 'mp-miniprogram, mp-weapp, [data-miniprogram-appid], [data-weapp-appid], [data-miniprogram]' },
+  { type: 'poll', label: '投票', selector: 'mp-vote, [data-vote-id], [data-type="vote"], [class~="vote_area"]' }
+];
+
+const errors = {
+  INVALID_RICH_TEXT: [400, '富文本内容无效。', '请重新复制正文后重试。'],
+  EMPTY_RICH_TEXT: [422, '富文本中没有可转换的可读内容。', '请保留正文文字后重试。']
+};
+
+export class RichTextError extends Error {
+  constructor(code) {
+    const [status, message, action] = errors[code] || errors.INVALID_RICH_TEXT;
+    super(message);
+    this.code = code in errors ? code : 'INVALID_RICH_TEXT';
+    this.status = status;
+    this.action = action;
+  }
+
+  toJSON() { return { code: this.code, message: this.message, action: this.action }; }
+}
+
+const fail = code => { throw new RichTextError(code); };
+const addOnce = (items, value) => { if (!items.includes(value)) items.push(value); };
+
+function safeUrl(value, { image = false } = {}) {
+  try {
+    const url = new URL(value);
+    return !url.username && !url.password && (url.protocol === 'https:' || !image && url.protocol === 'http:') ? url.href : '';
+  } catch { return ''; }
+}
+
+function sourceUrl($, element) {
+  for (const node of [element, ...element.find('source').toArray().map(item => $(item))]) {
+    for (const attribute of ['src', 'href', 'data', 'data-src', 'data-url', 'url']) {
+      const url = safeUrl(node.attr(attribute));
+      if (url) return url;
+    }
+  }
+  return undefined;
+}
+
+function escapeHtmlLikeText(value) {
+  return value.split(/(```[\s\S]*?```|`[^`]*`)/).map((part, index) => index % 2 ? part : part.replace(/(^|[^\\])<(\/?[a-z][^>\n]*)>/gi, '$1\\<$2>')).join('');
+}
+
+function replaceSpecialContent($, downgraded) {
+  for (const element of $('*').toArray()) {
+    const node = $(element);
+    const definition = specialContentTypes.find(candidate => node.is(candidate.selector));
+    if (!definition) continue;
+    const source = sourceUrl($, node);
+    const text = `[特殊内容：${definition.label}]${source ? ` 来源：${source}` : ''}`;
+    node.replaceWith(`<blockquote><p>${text}</p></blockquote>`);
+    downgraded.push(source ? { type: definition.type, sourceUrl: source } : { type: definition.type });
+  }
+}
+
+function removeUnsafeContent($, removed) {
+  $('script, style, link, meta, base, form, input, button, textarea, select, option, template').each((_, element) => {
+    $(element).remove();
+    addOnce(removed, $(element).is('form, input, button, textarea, select, option') ? 'form' : $(element).is('style, link') ? 'style' : 'script');
+  });
+  $('[style]').each((_, element) => { $(element).removeAttr('style'); addOnce(removed, 'style'); });
+  $('*').each((_, element) => {
+    const node = $(element);
+    for (const name of Object.keys(node.attr() || {})) if (/^on/i.test(name)) {
+      node.removeAttr(name);
+      addOnce(removed, 'event-handler');
+    }
+  });
+  $('[href], [src], [action]').each((_, element) => {
+    const node = $(element);
+    for (const name of ['href', 'src', 'action']) {
+      const value = node.attr(name);
+      if (value === undefined) continue;
+      const safe = safeUrl(value, { image: node.is('img') && name === 'src' });
+      if (safe) node.attr(name, safe);
+      else {
+        node.removeAttr(name);
+        addOnce(removed, 'unsafe-url');
+        if (node.is('img') && name === 'src') node.remove();
+      }
+    }
+  });
+}
+
+export function convertRichText(html) {
+  if (typeof html !== 'string' || !html.trim()) fail('INVALID_RICH_TEXT');
+  const $ = load(html);
+  const removed = [];
+  const downgraded = [];
+  replaceSpecialContent($, downgraded);
+  removeUnsafeContent($, removed);
+  const safeHtml = sanitizeHtml($('body').html() || '', {
+    allowedTags: ['p', 'br', 'div', 'section', 'article', 'main', 'header', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'del', 's', 'a', 'img', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
+    allowedAttributes: { a: ['href', 'title'], img: ['src', 'alt', 'width', 'height'], th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'] },
+    allowedSchemes: ['https', 'http'],
+    allowedSchemesByTag: { img: ['https'] },
+    allowProtocolRelative: false
+  });
+  const result = escapeHtmlLikeText(markdown.turndown(safeHtml).trim());
+  if (!result) fail('EMPTY_RICH_TEXT');
+  return { markdown: result, removed, downgraded };
+}
