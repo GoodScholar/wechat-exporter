@@ -113,7 +113,10 @@ test('自动保存等待期、请求期和 hidden 刷新有可观察状态与时
     await page.waitForTimeout(50);
     assert.equal(saves.length, 0);
     await page.waitForFunction(() => document.querySelector('#save-status')?.textContent === '保存中', undefined, { timeout: 1000 });
-    await firstSaveHeld;
+    await Promise.race([
+      firstSaveHeld,
+      new Promise((_, reject) => setTimeout(() => reject(new Error('自动保存请求未在 1000ms 内进入拦截路由')), 1000)),
+    ]);
     assert.equal(saves.length, 1);
     assert.ok(saves[0] - started >= 450);
     assert.ok(saves[0] - started < 1000, '自动保存请求必须在约 500ms 防抖后的一秒内启动');
