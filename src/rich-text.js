@@ -3,9 +3,14 @@ import sanitizeHtml from 'sanitize-html';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 
-const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
-markdown.use(gfm);
-markdown.addRule('block-container', {
+const markdownConverter = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
+const defaultEscape = markdownConverter.escape.bind(markdownConverter);
+markdownConverter.escape = value => defaultEscape(value).replace(/\\*<\/?[a-z][^>\n]*>/gi, text => {
+  const fence = '`'.repeat(Math.max(...[...text.matchAll(/`+/g)].map(match => match[0].length), 0) + 1);
+  return `${fence}${text}${fence}`;
+});
+markdownConverter.use(gfm);
+markdownConverter.addRule('block-container', {
   filter: ['div', 'section', 'article', 'main', 'header', 'footer'],
   replacement: content => `\n\n${content}\n\n`
 });
@@ -20,7 +25,8 @@ export const specialContentTypes = [
 
 const errors = {
   INVALID_RICH_TEXT: [400, '富文本内容无效。', '请重新复制正文后重试。'],
-  EMPTY_RICH_TEXT: [422, '富文本中没有可转换的可读内容。', '请保留正文文字后重试。']
+  EMPTY_RICH_TEXT: [422, '富文本中没有可转换的可读内容。', '请保留正文文字后重试。'],
+  RICH_TEXT_TOO_LARGE: [413, '富文本内容过大，无法安全转换。', '请缩短粘贴内容后重试。']
 };
 
 export class RichTextError extends Error {
@@ -53,10 +59,6 @@ function sourceUrl($, element) {
     }
   }
   return undefined;
-}
-
-function escapeHtmlLikeText(value) {
-  return value.split(/(```[\s\S]*?```|`[^`]*`)/).map((part, index) => index % 2 ? part : part.replace(/(^|[^\\])<(\/?[a-z][^>\n]*)>/gi, '$1\\<$2>')).join('');
 }
 
 function replaceSpecialContent($, downgraded) {
@@ -114,7 +116,7 @@ export function convertRichText(html) {
     allowedSchemesByTag: { img: ['https'] },
     allowProtocolRelative: false
   });
-  const result = escapeHtmlLikeText(markdown.turndown(safeHtml).trim());
+  const result = markdownConverter.turndown(safeHtml).trim();
   if (!result) fail('EMPTY_RICH_TEXT');
   return { markdown: result, removed, downgraded };
 }

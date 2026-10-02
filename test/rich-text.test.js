@@ -62,8 +62,7 @@ test('不可读的富文本返回稳定 typed error，不伪造空成功', () =>
 test('转义的 HTML 保持为文本，常见块容器保留段落边界', () => {
   const result = convertRichText('<div>第一段</div><div>第二段</div><p>&lt;img src="https://tracker.invalid/pixel"&gt;</p>');
   assert.match(result.markdown, /第一段\s*\n\s*第二段/);
-  assert.match(result.markdown, /\\<img src="https:\/\/tracker\.invalid\/pixel"\\?>/);
-  assert.doesNotMatch(result.markdown, /(?:^|[^\\])<img src="https:\/\/tracker\.invalid\/pixel"/);
+  assert.match(result.markdown, /`<img src="https:\/\/tracker\.invalid\/pixel">`/);
 });
 
 test('特殊媒体从子资源或 data 属性保留安全来源 URL', () => {
@@ -93,5 +92,29 @@ test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构�
     const preview = await (await post(server.base, '/api/typesetting/render', { body: escaped.markdown })).json();
     assert.doesNotMatch(preview.html, /<img\b/i);
     assert.match(preview.html, /&lt;img/);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本转换 HTTP API 覆盖恶意内容、全部特殊媒体和超限 typed error', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-http-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const hostile = await post(server.base, '/api/typesetting/rich-text', { html: '<p onclick="evil()">可读文字<script>evil()</script></p><a href="javascript:evil()">危险链接</a><img src="data:image/png;base64,abc"><form><input value="秘密"></form>' });
+    assert.equal(hostile.status, 200);
+    const hostileResult = await hostile.json();
+    assert.match(hostileResult.markdown, /可读文字/);
+    assert.doesNotMatch(hostileResult.markdown, /evil|javascript:|data:|秘密/i);
+    assert.deepEqual(hostileResult.removed.sort(), ['event-handler', 'form', 'script', 'unsafe-url']);
+
+    const media = await post(server.base, '/api/typesetting/rich-text', { html: '<video src="https://example.test/video"></video><audio src="https://example.test/audio"></audio><iframe src="https://example.test/embed"></iframe><mp-miniprogram></mp-miniprogram><div class="vote_area">投票</div>' });
+    assert.equal(media.status, 200);
+    assert.deepEqual((await media.json()).downgraded.map(item => item.type), ['video', 'audio', 'embed', 'mini-program', 'poll']);
+
+    const empty = await post(server.base, '/api/typesetting/rich-text', { html: '<script>only()</script>' });
+    assert.deepEqual(await empty.json(), { error: { code: 'EMPTY_RICH_TEXT', message: '富文本中没有可转换的可读内容。', action: '请保留正文文字后重试。' } });
+
+    const tooLarge = await post(server.base, '/api/typesetting/rich-text', { html: 'x'.repeat(160 * 1024) });
+    assert.equal(tooLarge.status, 413);
+    assert.deepEqual(await tooLarge.json(), { error: { code: 'RICH_TEXT_TOO_LARGE', message: '富文本内容过大，无法安全转换。', action: '请缩短粘贴内容后重试。' } });
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

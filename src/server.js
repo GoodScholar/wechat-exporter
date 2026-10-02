@@ -130,6 +130,10 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.use(express.static(path.join(root, 'public')));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
+    if (req.path === '/api/typesetting/rich-text' && error.type === 'entity.too.large') {
+      const typed = new RichTextError('RICH_TEXT_TOO_LARGE');
+      return res.status(typed.status).json({ error: typed.toJSON() });
+    }
     res.status(error.status === 409 ? 409 : 400).json({ error: error.message || '操作失败，请重试' });
   });
   return app;

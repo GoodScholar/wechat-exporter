@@ -329,10 +329,12 @@ test('富文本转换失败或旧响应到达时不修改当前文稿', async ()
     await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 3));
     assert.equal((await dispatchPaste(page, { html: '<strong>旧结果</strong>' })).defaultPrevented, true);
     await reached;
-    await page.getByLabel('Markdown 正文').fill('用户的新编辑');
+    await page.getByLabel('Markdown 正文').fill('临时新编辑');
+    await page.getByLabel('Markdown 正文').fill('失败前正文');
+    await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 3));
     release();
     await page.getByText('正文或选区已变化，请重新粘贴后重试。', { exact: true }).waitFor();
-    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '用户的新编辑');
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '失败前正文');
     assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '失败前正文');
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
@@ -351,5 +353,47 @@ test('块级富文本插入行内选区时保留 Markdown 与预览的块边界'
     assert.equal((await dispatchPaste(page, { html: '<h1>插入标题</h1>' })).defaultPrevented, true);
     await page.getByRole('heading', { name: '插入标题' }).waitFor();
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲\n\n# 插入标题\n\n丙');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('多段富文本插入选区时保留两侧 Markdown 块边界', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-paragraphs-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    assert.equal((await dispatchPaste(page, { html: '<div>第一段</div><div>第二段</div>' })).defaultPrevented, true);
+    await page.getByText('第二段', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲\n\n第一段\n\n第二段\n\n丙');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本插入进入原生撤销栈，转义标签不触发外部资源请求', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-undo-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    let resourceRequests = 0;
+    await page.route('https://tracker.invalid/**', route => { resourceRequests++; return route.abort(); });
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    assert.equal((await dispatchPaste(page, { html: '<p>\\\\&lt;img src="https://tracker.invalid/pixel"&gt;</p>' })).defaultPrevented, true);
+    await page.getByText('已转换富文本', { exact: false }).waitFor();
+    assert.equal(await page.locator('#preview img').count(), 0);
+    assert.equal(resourceRequests, 0);
+    await page.getByLabel('Markdown 正文').focus();
+    await page.keyboard.press('Meta+Z');
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
+    await page.keyboard.press('Meta+Shift+Z');
+    assert.match(await page.getByLabel('Markdown 正文').inputValue(), /tracker\.invalid/);
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });

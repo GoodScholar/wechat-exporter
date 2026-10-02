@@ -13,6 +13,7 @@ let dirty = false;
 let changeVersion = 0;
 let previewVersion = 0;
 let richPastePending = false;
+let richPasteVersion = 0;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
@@ -77,7 +78,7 @@ function richTextError(error) {
   return [details.message || '富文本转换失败，请重试。', details.action].filter(Boolean).join(' ');
 }
 function preserveBlockBoundaries(markdown, snapshot) {
-  if (!/(^|\n)(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|\||```)/.test(markdown)) return markdown;
+  if (!/\n\s*\n|(^|\n)(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|\||```)/.test(markdown)) return markdown;
   const before = snapshot.body.slice(0, snapshot.start);
   const after = snapshot.body.slice(snapshot.end);
   return `${before && !before.endsWith('\n') ? '\n\n' : ''}${markdown}${after && !after.startsWith('\n') ? '\n\n' : ''}`;
@@ -88,20 +89,21 @@ fields.body.addEventListener('paste', async event => {
   event.preventDefault();
   if (richPastePending) { showRichTextMessage('正在转换上一段富文本，请稍后再试。'); return; }
   if (!window.confirm('检测到富文本，将转换为 Markdown 后插入当前选区。是否继续？')) return;
-  const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd };
+  const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd, changeVersion, request: ++richPasteVersion };
   richPastePending = true;
   showRichTextMessage('正在安全转换富文本…');
   try {
     const response = await fetch('/api/typesetting/rich-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html }) });
     const result = await response.json();
     if (!response.ok) throw result.error;
-    if (fields.body.value !== snapshot.body || fields.body.selectionStart !== snapshot.start || fields.body.selectionEnd !== snapshot.end) {
+    if (snapshot.request !== richPasteVersion || changeVersion !== snapshot.changeVersion || fields.body.value !== snapshot.body || fields.body.selectionStart !== snapshot.start || fields.body.selectionEnd !== snapshot.end) {
       showRichTextMessage('正文或选区已变化，请重新粘贴后重试。');
       return;
     }
     const markdown = preserveBlockBoundaries(result.markdown, snapshot);
-    fields.body.setRangeText(markdown, snapshot.start, snapshot.end, 'end');
-    fields.body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertFromPaste', data: markdown }));
+    fields.body.focus();
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    if (!document.execCommand('insertText', false, markdown)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
     showRichTextMessage(`已转换富文本${result.removed.length ? `，移除 ${result.removed.length} 项` : ''}${result.downgraded.length ? `，降级 ${result.downgraded.length} 项特殊内容` : ''}。`);
   } catch (error) { showRichTextMessage(richTextError(error)); }
   finally { richPastePending = false; }
