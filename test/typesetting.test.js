@@ -66,6 +66,27 @@ test('三套主题对代表性 Markdown 生成完全相同的语义 HTML', () =>
   })));
 });
 
+test('预览 presentation 拒绝顶层额外键', () => {
+  const presentation = { theme: 'default', settings: expectedThemeSettings.default };
+  for (const extra of [{ extra: 'ignored' }, { customCss: 'body{display:none}' }]) {
+    assert.throws(() => normalizeTypesettingPresentation({ ...presentation, ...extra }), error => error.status === 400);
+  }
+});
+
+test('预览 API 拒绝顶层 customCss', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-top-level-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const response = await post(server.base, '/api/typesetting/render', {
+      body: representativeMarkdown,
+      theme: 'default',
+      settings: expectedThemeSettings.default,
+      customCss: 'body{display:none}'
+    });
+    assert.equal(response.status, 400);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-presentation-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));

@@ -44,7 +44,7 @@ function normalizeDocumentThemeSettings(settings) {
 }
 
 export function normalizeTypesettingPresentation(value) {
-  if (typeof value !== 'object' || value === null) return invalidDocument('排版主题配置无效');
+  if (!hasExactKeys(value, ['theme', 'settings'])) return invalidDocument('排版主题配置无效');
   return { theme: normalizeTheme(value.theme), settings: normalizeThemeSettings(value.settings) };
 }
 
