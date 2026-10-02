@@ -25,7 +25,10 @@ const errorDetails = {
   UNSUPPORTED_MESSAGE: [422, '该消息类型暂不支持导入编辑。', '请返回文章导出功能查看原文。'],
   PERSISTENCE_FAILED: [500, '无法保存导入文稿，请检查本机数据目录。', '检查数据目录权限后重试。']
 };
-const failWith = code => fail(code, ...(errorDetails[code] || errorDetails.UNSUPPORTED_MESSAGE));
+const failWith = code => {
+  const normalizedCode = errorDetails[code] ? code : 'UNSUPPORTED_MESSAGE';
+  fail(normalizedCode, ...errorDetails[normalizedCode]);
+};
 
 function normalizePublishedAt(value) {
   const match = String(value).match(/(\d{4})\s*(?:年|[-/.])\s*(\d{1,2})\s*(?:月|[-/.])\s*(\d{1,2})/);

@@ -120,5 +120,5 @@ body{max-width:760px;margin:48px auto;padding:0 28px;color:#242c29;font:16px/1.8
 
 export function renderMarkdown(article) {
   const metadata = [...new Set([article.account, article.author, article.date].filter(Boolean))].map(s => markdown.turndown(escapeHtml(s))).join(' / ');
-  return `# ${markdown.turndown(escapeHtml(article.title))}\n\n${metadata}\n\n[查看原文](${article.url})\n\n${markdown.turndown(article.content)}\n${article.warnings.map(w => '\n> ' + w + '\n').join('')}`;
+  return `# ${markdown.turndown(escapeHtml(article.title))}\n\n${metadata}\n\n[查看原文](${article.url})\n\n${renderArticleBodyMarkdown(article)}\n${article.warnings.map(w => '\n> ' + w + '\n').join('')}`;
 }

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, rm, writeFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -33,6 +33,7 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     const preview = await (await post(server.base, '/api/typesetting/render', { body: unsafe })).json();
     assert.match(preview.html, /<h1/);
     assert.doesNotMatch(preview.html, /script|onerror|javascript:/i);
+    assert.equal((await post(server.base, '/api/typesetting/document', { title: '第一篇', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '较旧的正文', revision: 1 })).status, 200);
     assert.equal((await post(server.base, '/api/typesetting/document', { title: '第一篇', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '较新的正文', revision: 2 })).status, 200);
     const stale = await post(server.base, '/api/typesetting/document', { title: '旧标题', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '旧正文', revision: 1 });
     assert.equal(stale.status, 409);
@@ -42,12 +43,13 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     await server.close();
     server = await serve(createApp({ dataDir, interval: 0 }));
     assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.author, '作者');
-    await writeFile(path.join(dataDir, 'typesetting-document.json'), '{corrupted');
+    const manifest = JSON.parse(await readFile(path.join(dataDir, 'typesetting-document.manifest.json'), 'utf8'));
+    await writeFile(path.join(dataDir, 'typesetting-versions', `${manifest.current}.json`), '{corrupted');
     await server.close();
     server = await serve(createApp({ dataDir, interval: 0 }));
     const restored = await (await fetch(server.base + '/api/typesetting/document')).json();
-    assert.equal(restored.document.body, '较新的正文');
-    assert.equal(restored.document.revision, 2);
+    assert.equal(restored.document.body, '较旧的正文');
+    assert.equal(restored.document.revision, 1);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 

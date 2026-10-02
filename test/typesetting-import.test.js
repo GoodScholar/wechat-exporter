@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -62,13 +62,13 @@ test('导入 API 将普通文章一次性保存为独立元信息和语义 Markd
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('主文件或备份提交失败时，导入返回持久化错误且不改变内存或两个文件', async () => {
-  for (const failedFile of ['typesetting-document.json', 'typesetting-document.backup.json']) {
+test('版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
+  for (const phase of ['current-version', 'manifest']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
     const dataDir = path.join(root, '.data');
-    let rejectWrites = false;
+    let failingPhase = '';
     const writeAtomically = async (file, text) => {
-      if (rejectWrites && file.endsWith(failedFile)) throw new Error('disk denied');
+      if (failingPhase === phase && (phase === 'manifest' ? file.endsWith('typesetting-document.manifest.json') : file.includes('typesetting-versions'))) throw new Error('disk denied');
       const temporary = `${file}.test`;
       await writeFile(temporary, text, 'utf8');
       await rename(temporary, file);
@@ -76,18 +76,81 @@ test('主文件或备份提交失败时，导入返回持久化错误且不改�
     const store = new TypesettingStore(dataDir, { writeAtomically });
     try {
       await store.save({ title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文', revision: 1 });
-      const before = await Promise.all([readFile(store.file, 'utf8'), readFile(store.backup, 'utf8')]);
-      rejectWrites = true;
+      const manifest = await readFile(store.manifest, 'utf8');
+      failingPhase = phase;
       const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
       try {
         const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
-        assert.equal(response.status, 500, failedFile);
+        assert.equal(response.status, 500, phase);
         assert.equal((await response.json()).error.code, 'PERSISTENCE_FAILED');
-        assert.deepEqual(await Promise.all([readFile(store.file, 'utf8'), readFile(store.backup, 'utf8')]), before);
+        assert.equal(await readFile(store.manifest, 'utf8'), manifest);
         assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '旧正文');
+        assert.equal((await new TypesettingStore(dataDir).load()).body, '旧正文');
       } finally { await server.close(); }
     } finally { await rm(root, { recursive: true, force: true }); }
   }
+});
+
+test('迁移旧主/备份文稿后，恢复候选写入失败不会暴露候选导入', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-migration-'));
+  const dataDir = path.join(root, '.data');
+  let rejectRecovery = false;
+  const writeAtomically = async (file, text) => {
+    if (rejectRecovery && file.includes('typesetting-versions') && text.includes('旧正文')) throw new Error('recovery denied');
+    const temporary = `${file}.test`;
+    await writeFile(temporary, text, 'utf8');
+    await rename(temporary, file);
+  };
+  const store = new TypesettingStore(dataDir, { writeAtomically });
+  try {
+    const legacy = JSON.stringify({ title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文', revision: 1, savedAt: '' });
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(store.file, legacy, 'utf8');
+    await writeFile(store.backup, legacy, 'utf8');
+    assert.equal((await store.load()).body, '旧正文');
+    rejectRecovery = true;
+    const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
+    try {
+      const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+      assert.equal(response.status, 500);
+      assert.equal((await response.json()).error.code, 'PERSISTENCE_FAILED');
+      assert.equal(await readFile(store.file, 'utf8'), legacy);
+      assert.equal(await readFile(store.backup, 'utf8'), legacy);
+      assert.equal((await new TypesettingStore(dataDir).load()).body, '旧正文');
+    } finally { await server.close(); }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('旧固定文稿迁移为 manifest 后，新进程从版本文稿继续读取', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-migration-success-'));
+  const dataDir = path.join(root, '.data');
+  const store = new TypesettingStore(dataDir);
+  const legacy = JSON.stringify({ title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文', revision: 1, savedAt: '' });
+  try {
+    await mkdir(dataDir, { recursive: true });
+    await writeFile(store.file, legacy, 'utf8');
+    await writeFile(store.backup, legacy, 'utf8');
+    assert.equal((await store.load()).body, '旧正文');
+    await store.save({ title: '新标题', author: '', account: '', publishedAt: '', body: '新正文', revision: 2 });
+    assert.ok(JSON.parse(await readFile(store.manifest, 'utf8')).current);
+    assert.equal(await readFile(store.file, 'utf8'), legacy);
+    assert.equal(await readFile(store.backup, 'utf8'), legacy);
+    assert.equal((await new TypesettingStore(dataDir).load()).body, '新正文');
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('提交后清理旧版本失败不破坏已提交文稿', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-cleanup-'));
+  const dataDir = path.join(root, '.data');
+  let failCleanup = false;
+  const store = new TypesettingStore(dataDir, { removeFile: async file => { if (failCleanup) throw new Error('cleanup denied'); await rm(file); } });
+  try {
+    await store.save({ title: '第一版', author: '', account: '', publishedAt: '', body: '正文一', revision: 1 });
+    await store.save({ title: '第二版', author: '', account: '', publishedAt: '', body: '正文二', revision: 2 });
+    failCleanup = true;
+    await store.save({ title: '第三版', author: '', account: '', publishedAt: '', body: '正文三', revision: 3 });
+    assert.equal((await new TypesettingStore(dataDir).load()).body, '正文三');
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化文稿', async () => {
@@ -110,13 +173,13 @@ test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化
   } }));
   try {
     await seed(server.base);
-    const file = path.join(dataDir, 'typesetting-document.json');
-    const original = await readFile(file, 'utf8');
+    const manifest = path.join(dataDir, 'typesetting-document.manifest.json');
+    const original = await readFile(manifest, 'utf8');
     const unconfirmed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: false });
     assert.equal(unconfirmed.status, 409);
     assert.deepEqual((await unconfirmed.json()).error, { code: 'CONFIRM_REQUIRED', message: '当前文稿已有内容，请确认替换后再导入。', action: '确认替换当前文稿后重试。' });
     assert.equal(fetches, 0);
-    assert.equal(await readFile(file, 'utf8'), original);
+    assert.equal(await readFile(manifest, 'utf8'), original);
 
     const cases = [
       ['invalid', 'https://example.com/a', 'INVALID_LINK', 400],
@@ -136,7 +199,7 @@ test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化
       assert.equal(result.error.code, code);
       assert.match(result.error.message, /[\u4e00-\u9fff]/);
       assert.match(result.error.action, /[\u4e00-\u9fff]/);
-      assert.equal(await readFile(file, 'utf8'), original, `${code} 不能修改文稿文件`);
+      assert.equal(await readFile(manifest, 'utf8'), original, `${code} 不能修改文稿文件`);
       assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '原有正文');
     }
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
@@ -150,6 +213,17 @@ test('导入保存异常返回稳定 typed error 而非通用 400', async () => 
     const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 0, confirmed: false });
     assert.equal(response.status, 500);
     assert.deepEqual((await response.json()).error, { code: 'PERSISTENCE_FAILED', message: '无法保存导入文稿，请检查本机数据目录。', action: '检查数据目录权限后重试。' });
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('未知解析异常回退为完整的不支持类型错误', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-unknown-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => Symbol('not-html') }));
+  try {
+    const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 0, confirmed: false });
+    assert.equal(response.status, 422);
+    assert.deepEqual((await response.json()).error, { code: 'UNSUPPORTED_MESSAGE', message: '该消息类型暂不支持导入编辑。', action: '请返回文章导出功能查看原文。' });
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 

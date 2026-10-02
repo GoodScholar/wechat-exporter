@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sanitizeHtml from 'sanitize-html';
 import { marked } from 'marked';
@@ -32,23 +32,33 @@ async function writeAtomically(file, text) {
   await rename(temporary, file);
 }
 
-async function readStored(file) {
-  try { return await readFile(file, 'utf8'); }
-  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
-}
-
 export class TypesettingStore {
-  constructor(dataDir, { writeAtomically: replaceFile = writeAtomically } = {}) {
+  constructor(dataDir, { writeAtomically: replaceFile = writeAtomically, removeFile = unlink } = {}) {
     this.dataDir = dataDir;
     this.file = path.join(dataDir, 'typesetting-document.json');
     this.backup = path.join(dataDir, 'typesetting-document.backup.json');
+    this.manifest = path.join(dataDir, 'typesetting-document.manifest.json');
+    this.versions = path.join(dataDir, 'typesetting-versions');
     this.document = null;
+    this.versionId = null;
     this.writes = Promise.resolve();
     this.replaceFile = replaceFile;
+    this.removeFile = removeFile;
   }
 
   async load() {
     if (this.document) return this.document;
+    try {
+      const manifest = JSON.parse(await readFile(this.manifest, 'utf8'));
+      for (const versionId of [manifest.current, manifest.recovery]) {
+        if (typeof versionId !== 'string') continue;
+        try {
+          this.document = normalizeDocument(JSON.parse(await readFile(path.join(this.versions, `${versionId}.json`), 'utf8')));
+          this.versionId = versionId;
+          return this.document;
+        } catch { /* Try the recovery version before legacy files. */ }
+      }
+    } catch { /* Legacy documents have no manifest. */ }
     for (const file of [this.file, this.backup]) {
       try {
         this.document = normalizeDocument(JSON.parse(await readFile(file, 'utf8')));
@@ -72,18 +82,18 @@ export class TypesettingStore {
       if (next.revision === current.revision) return current;
       next.savedAt = new Date().toISOString();
       const serialized = JSON.stringify(next, null, 2);
-      const previousBackup = await readStored(this.backup);
-      await mkdir(this.dataDir, { recursive: true });
-      await this.replaceFile(this.backup, serialized);
-      try { await this.replaceFile(this.file, serialized); }
-      catch (error) {
-        try {
-          if (previousBackup === null) await unlink(this.backup);
-          else await this.replaceFile(this.backup, previousBackup);
-        } catch { /* The original primary remains authoritative if recovery-copy rollback also fails. */ }
-        throw error;
-      }
+      const versionId = randomUUID();
+      const recoveryId = this.versionId || (current.revision ? randomUUID() : versionId);
+      await mkdir(this.versions, { recursive: true });
+      if (!this.versionId && current.revision) await this.replaceFile(path.join(this.versions, `${recoveryId}.json`), JSON.stringify(current, null, 2));
+      await this.replaceFile(path.join(this.versions, `${versionId}.json`), serialized);
+      await this.replaceFile(this.manifest, JSON.stringify({ current: versionId, recovery: recoveryId }, null, 2));
       this.document = next;
+      this.versionId = versionId;
+      try {
+        const keep = new Set([versionId, recoveryId]);
+        for (const name of await readdir(this.versions)) if (name.endsWith('.json') && !keep.has(name.slice(0, -5))) await this.removeFile(path.join(this.versions, name));
+      } catch { /* Cleanup is post-commit and never changes the visible manifest. */ }
       return next;
     };
     const result = this.writes.then(operation, operation);
