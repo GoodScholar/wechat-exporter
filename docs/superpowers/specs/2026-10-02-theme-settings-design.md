@@ -131,12 +131,14 @@ Markdown 仍只经过现有 `marked -> sanitize-html` 管线生成正文 HTML。
 ## 文件职责
 
 - `src/typesetting.js`：主题常量、严格规范化、文稿 schema、原子持久化比较和主题无关的 Markdown 渲染。
+- `src/typesetting-import.js`：导入新文章内容时保留当前文稿的主题和三套设置。
 - `src/server.js`：文稿与预览 API 的主题参数传递和错误响应。
 - `public/typesetting.html`：固定主题及设置控件。
 - `public/typesetting.js`：主题状态装载、切换、重置、预览和自动保存衔接。
 - `public/typesetting-theme.css`：三套作用域主题和四个 CSS 变量。
 - `public/style.css`：设置区工作台布局及窄屏适配，不承担文章主题规则。
 - `test/typesetting.test.js`：模型、HTTP、浏览器、故障注入和回归证据。
+- `test/typesetting-import.test.js`：文章导入保留主题设置以及既有导入错误路径的回归证据。
 - `THIRD_PARTY_NOTICES.md`：固定来源、许可和适配范围。
 
 ## 非目标
