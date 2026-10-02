@@ -5,7 +5,7 @@ import sanitizeHtml from 'sanitize-html';
 import { marked } from 'marked';
 
 const fields = ['title', 'author', 'account', 'publishedAt', 'body'];
-const emptyDocument = () => ({ title: '', author: '', account: '', publishedAt: '', body: '', revision: 0 });
+const emptyDocument = () => ({ title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '' });
 
 function normalizeDocument(value) {
   const document = emptyDocument();
@@ -15,6 +15,8 @@ function normalizeDocument(value) {
   }
   if (!Number.isSafeInteger(value?.revision) || value.revision < 0) return invalidDocument('排版文稿修订号无效');
   document.revision = value.revision;
+  if (value?.savedAt !== undefined && typeof value.savedAt !== 'string') return invalidDocument('排版文稿保存时间无效');
+  document.savedAt = value?.savedAt || '';
   return document;
 }
 
@@ -55,12 +57,14 @@ export class TypesettingStore {
     const operation = async () => {
       const current = await this.load();
       const next = normalizeDocument(input);
-      if (next.revision < current.revision || (next.revision === current.revision && JSON.stringify(next) !== JSON.stringify(current))) {
+      const sameContent = fields.every(field => next[field] === current[field]);
+      if (next.revision < current.revision || (next.revision === current.revision && !sameContent)) {
         const error = new Error('文稿已更新，请刷新后重试');
         error.status = 409;
         throw error;
       }
       if (next.revision === current.revision) return current;
+      next.savedAt = new Date().toISOString();
       const serialized = JSON.stringify(next, null, 2);
       await mkdir(this.dataDir, { recursive: true });
       await writeAtomically(this.file, serialized);
