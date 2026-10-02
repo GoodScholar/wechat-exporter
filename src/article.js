@@ -7,6 +7,16 @@ const markdown = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fen
 markdown.use(gfm);
 export const escapeHtml = (s = '') => String(s).replace(/[&<>"']/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]);
 
+export class ArticleError extends Error {
+  constructor(code, message) { super(message); this.code = code; }
+}
+
+const articleError = (code, message) => { throw new ArticleError(code, message); };
+
+export function getWeChatMessageType(html) {
+  return String(html).match(/\bitem_show_type\s*[:=]\s*["']?(\d+)/)?.[1] || '';
+}
+
 export function normalizeUrl(value) {
   let url;
   try { url = new URL(value.replaceAll('&amp;', '&')); } catch { throw new Error('请输入完整的微信公众号文章链接'); }
@@ -46,10 +56,11 @@ export function parseArticle(html, url) {
     const visible = $('body').clone();
     visible.find('script, style').remove();
     const text = $('title').text() + visible.text();
-    if (/账号已迁移|帐号已迁移/.test(text)) throw new Error('公众号账号已迁移，请在微信中打开文章并复制迁移后的新链接');
-    if (/验证|环境异常|访问过于频繁/.test(text)) throw new Error('微信要求访问验证。请点击「浏览器验证」，完成验证后重试');
-    if (/已被.*删除|内容已删除|内容无法查看|该内容已被|已被屏蔽/.test(text)) throw new Error('文章已删除或无法查看，请在微信中确认链接');
-    throw new Error('未找到文章正文，可能是访问受限或暂不支持的消息类型');
+    if (/账号已迁移|帐号已迁移/.test(text)) articleError('UNSUPPORTED_MESSAGE', '公众号账号已迁移，请在微信中打开文章并复制迁移后的新链接');
+    if (/验证|环境异常|访问过于频繁/.test(text)) articleError('ACCESS_VERIFICATION', '微信要求访问验证。请完成浏览器验证后重试');
+    if (/已被.*删除|内容已删除|内容无法查看|该内容已被|已被屏蔽/.test(text)) articleError('ARTICLE_UNAVAILABLE', '文章已删除或无法查看，请在微信中确认链接');
+    if (body.length) articleError('EMPTY_BODY', '文章正文为空，暂时无法导入编辑');
+    articleError('UNSUPPORTED_MESSAGE', '未找到文章正文，可能是访问受限或暂不支持的消息类型');
   }
   const title = $('#activity-name').text().trim() || $('meta[property="og:title"]').attr('content') || $('title').text().trim() || '未命名文章';
   const account = $('#js_name').text().trim() || $('meta[property="og:article:author"]').attr('content') || '';
@@ -85,8 +96,16 @@ export function parseArticle(html, url) {
     } }
   });
   const readable = load(content, null, false);
-  if (!readable.root().text().trim() && !readable('img[src]').length) throw new Error('未找到可导出的正文，可能是暂不支持的消息类型，请在微信中查看原文');
+  if (!readable.root().text().trim() && !readable('img[src]').length) {
+    const error = new ArticleError('UNSUPPORTED_MESSAGE', '未找到可导出的正文，可能是暂不支持的消息类型，请在微信中查看原文');
+    error.emptyBody = true;
+    throw error;
+  }
   return { title, account, author, date, url, content, warnings };
+}
+
+export function renderArticleBodyMarkdown(article) {
+  return markdown.turndown(article.content);
 }
 
 export function renderHtml(article) {

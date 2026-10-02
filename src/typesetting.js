@@ -68,8 +68,9 @@ export class TypesettingStore {
       const serialized = JSON.stringify(next, null, 2);
       await mkdir(this.dataDir, { recursive: true });
       await writeAtomically(this.file, serialized);
-      await writeAtomically(this.backup, serialized);
       this.document = next;
+      try { await writeAtomically(this.backup, serialized); }
+      catch { /* The primary file is committed; retain the last usable recovery copy. */ }
       return next;
     };
     const result = this.writes.then(operation, operation);
