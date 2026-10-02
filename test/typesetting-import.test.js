@@ -62,6 +62,60 @@ test('导入 API 将普通文章一次性保存为独立元信息和语义 Markd
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('文章导入替换内容但保留当前主题和全部非当前主题设置', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-theme-'));
+  const dataDir = path.join(root, '.data');
+  const themeSettings = {
+    default: { primaryColor: '#0F4C81', fontSize: '14px', lineHeight: '1.5', blockSpacing: '0.75' },
+    grace: { primaryColor: '#009874', fontSize: '15px', lineHeight: '1.65', blockSpacing: '0.9' },
+    simple: { primaryColor: '#FA5151', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' }
+  };
+  const expectedPresentation = JSON.stringify({ theme: 'grace', themeSettings });
+  let mode = 'success';
+  const fetchArticle = async () => {
+    if (mode === 'network') throw new Error('socket closed');
+    return articleHtml;
+  };
+  let server = await serve(createApp({ dataDir, interval: 0, fetchArticle }));
+  const assertPresentation = async () => {
+    const document = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    assert.equal(JSON.stringify({ theme: document.theme, themeSettings: document.themeSettings }), expectedPresentation);
+  };
+  try {
+    const saved = await post(server.base, '/api/typesetting/document', {
+      title: '原有标题', author: '原作者', account: '原公众号', publishedAt: '2026-09-01', body: '原有正文',
+      theme: 'grace', themeSettings, revision: 1
+    });
+    assert.equal(saved.status, 200);
+
+    const imported = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(imported.status, 200);
+    const document = (await imported.json()).document;
+    assert.deepEqual(Object.fromEntries(['title', 'author', 'account', 'publishedAt'].map(field => [field, document[field]])), {
+      title: '可导入文章', author: '测试作者', account: '测试公众号', publishedAt: '2026-09-19'
+    });
+    assert.match(document.body, /## 第一节/);
+    assert.equal(JSON.stringify({ theme: document.theme, themeSettings: document.themeSettings }), expectedPresentation);
+
+    await server.close();
+    server = await serve(createApp({ dataDir, interval: 0, fetchArticle }));
+    await assertPresentation();
+
+    const unconfirmed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: false });
+    assert.equal(unconfirmed.status, 409);
+    await assertPresentation();
+
+    mode = 'network';
+    const failed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: true });
+    assert.equal(failed.status, 502);
+    await assertPresentation();
+
+    const conflict = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(conflict.status, 409);
+    await assertPresentation();
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('任一版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
   for (const phase of ['current-version', 'recovery-version', 'manifest']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
