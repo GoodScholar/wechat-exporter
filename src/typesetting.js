@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { mkdir, readFile, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import sanitizeHtml from 'sanitize-html';
 import { marked } from 'marked';
@@ -32,13 +32,19 @@ async function writeAtomically(file, text) {
   await rename(temporary, file);
 }
 
+async function readStored(file) {
+  try { return await readFile(file, 'utf8'); }
+  catch (error) { if (error.code === 'ENOENT') return null; throw error; }
+}
+
 export class TypesettingStore {
-  constructor(dataDir) {
+  constructor(dataDir, { writeAtomically: replaceFile = writeAtomically } = {}) {
     this.dataDir = dataDir;
     this.file = path.join(dataDir, 'typesetting-document.json');
     this.backup = path.join(dataDir, 'typesetting-document.backup.json');
     this.document = null;
     this.writes = Promise.resolve();
+    this.replaceFile = replaceFile;
   }
 
   async load() {
@@ -66,11 +72,18 @@ export class TypesettingStore {
       if (next.revision === current.revision) return current;
       next.savedAt = new Date().toISOString();
       const serialized = JSON.stringify(next, null, 2);
+      const previousBackup = await readStored(this.backup);
       await mkdir(this.dataDir, { recursive: true });
-      await writeAtomically(this.file, serialized);
+      await this.replaceFile(this.backup, serialized);
+      try { await this.replaceFile(this.file, serialized); }
+      catch (error) {
+        try {
+          if (previousBackup === null) await unlink(this.backup);
+          else await this.replaceFile(this.backup, previousBackup);
+        } catch { /* The original primary remains authoritative if recovery-copy rollback also fails. */ }
+        throw error;
+      }
       this.document = next;
-      try { await writeAtomically(this.backup, serialized); }
-      catch { /* The primary file is committed; retain the last usable recovery copy. */ }
       return next;
     };
     const result = this.writes.then(operation, operation);

@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdir, mkdtemp, readFile, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
@@ -12,7 +12,7 @@ const articleUrl = 'https://mp.weixin.qq.com/s?__biz=abc&mid=1&idx=2&sn=xyz';
 const articleHtml = `<!doctype html><html><body>
   <h1 id="activity-name">可导入文章</h1><a id="js_name">测试公众号</a>
   <span id="js_author_name">测试作者</span><span id="publish_time">2026年9月19日 10:00</span>
-  <div id="js_content"><h2>第一节</h2><p>正文<strong>重点</strong>与<a href="https://example.com">链接</a>。</p><img data-src="https://mmbiz.qpic.cn/example.png" alt="配图"><blockquote>引用</blockquote><ul><li>条目</li></ul><table><tr><th>列</th></tr><tr><td>值</td></tr></table><pre><code>const x = 1;</code></pre></div>
+  <div id="js_content"><h2>第一节</h2><p>正文<strong>重点</strong>与<a href="https://example.com">链接</a>。</p><img data-src="https://fixture.invalid/example.png" alt="配图"><blockquote>引用</blockquote><ul><li>条目</li></ul><table><tr><th>列</th></tr><tr><td>值</td></tr></table><pre><code>const x = 1;</code></pre></div>
 </body></html>`;
 
 async function serve(app) {
@@ -30,6 +30,12 @@ async function seed(base, body = '原有正文') {
   assert.equal(response.status, 200);
 }
 
+async function fixturePage(browser) {
+  const page = await browser.newPage();
+  await page.route('https://fixture.invalid/**', route => route.fulfill({ status: 204 }));
+  return page;
+}
+
 test('导入 API 将普通文章一次性保存为独立元信息和语义 Markdown，重启不会重新抓取', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-'));
   const dataDir = path.join(root, '.data');
@@ -45,7 +51,7 @@ test('导入 API 将普通文章一次性保存为独立元信息和语义 Markd
     assert.match(result.document.body, /## 第一节/);
     assert.match(result.document.body, /\*\*重点\*\*/);
     assert.match(result.document.body, /\[链接\]\(https:\/\/example.com\)/);
-    assert.match(result.document.body, /https:\/\/mmbiz.qpic.cn\/example.png/);
+    assert.match(result.document.body, /https:\/\/fixture.invalid\/example.png/);
     assert.doesNotMatch(result.document.body, /^# 可导入文章/m);
     assert.equal(fetches, 1);
     await server.close();
@@ -56,21 +62,32 @@ test('导入 API 将普通文章一次性保存为独立元信息和语义 Markd
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('主文稿保存成功而恢复备份不可写时，导入仍作为成功结果提交一致的当前文稿', async () => {
-  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-backup-'));
-  const dataDir = path.join(root, '.data');
-  await mkdir(path.join(dataDir, 'typesetting-document.backup.json'), { recursive: true });
-  const store = new TypesettingStore(dataDir);
-  try {
-    const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
+test('主文件或备份提交失败时，导入返回持久化错误且不改变内存或两个文件', async () => {
+  for (const failedFile of ['typesetting-document.json', 'typesetting-document.backup.json']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
+    const dataDir = path.join(root, '.data');
+    let rejectWrites = false;
+    const writeAtomically = async (file, text) => {
+      if (rejectWrites && file.endsWith(failedFile)) throw new Error('disk denied');
+      const temporary = `${file}.test`;
+      await writeFile(temporary, text, 'utf8');
+      await rename(temporary, file);
+    };
+    const store = new TypesettingStore(dataDir, { writeAtomically });
     try {
-      const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 0, confirmed: false });
-      assert.equal(response.status, 200);
-      assert.equal((await response.json()).document.title, '可导入文章');
-      assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.title, '可导入文章');
-      assert.match(await readFile(path.join(dataDir, 'typesetting-document.json'), 'utf8'), /可导入文章/);
-    } finally { await server.close(); }
-  } finally { await rm(root, { recursive: true, force: true }); }
+      await store.save({ title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文', revision: 1 });
+      const before = await Promise.all([readFile(store.file, 'utf8'), readFile(store.backup, 'utf8')]);
+      rejectWrites = true;
+      const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
+      try {
+        const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+        assert.equal(response.status, 500, failedFile);
+        assert.equal((await response.json()).error.code, 'PERSISTENCE_FAILED');
+        assert.deepEqual(await Promise.all([readFile(store.file, 'utf8'), readFile(store.backup, 'utf8')]), before);
+        assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '旧正文');
+      } finally { await server.close(); }
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
 });
 
 test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化文稿', async () => {
@@ -79,10 +96,10 @@ test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化
   let mode = 'success';
   let fetches = 0;
   const fixtures = {
-    verification: '<html><body>环境异常，请完成验证</body></html>',
-    unavailable: '<html><body>该内容已被发布者删除</body></html>',
+    verification: '<html><body>环境异常，请完成验证<script>var item_show_type=8</script></body></html>',
+    unavailable: '<html><body>该内容已被发布者删除<script>var item_show_type=8</script></body></html>',
     empty: '<html><body><div id="js_content"></div></body></html>',
-    image: '<html><body><script>var item_show_type = 8;</script><div id="js_content"><img src="https://mmbiz.qpic.cn/picture.png"></div></body></html>',
+    image: '<html><body><script>var item_show_type = 8;</script><div id="js_content"><img src="https://fixture.invalid/picture.png"></div></body></html>',
     unsupported: '<html><body><script>var item_show_type = 12;</script></body></html>',
     sanitizedEmpty: '<html><body><div id="js_content"><script>var hidden = "data";</script><style>.x{display:none}</style></div></body></html>'
   };
@@ -125,6 +142,28 @@ test('导入 API 拒绝未确认替换，并对所有分类失败保留持久化
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('导入保存异常返回稳定 typed error 而非通用 400', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-save-error-'));
+  const typesettingStore = { load: async () => ({ title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '' }), save: async () => { throw new Error('disk denied'); } };
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0, typesettingStore, fetchArticle: async () => articleHtml }));
+  try {
+    const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 0, confirmed: false });
+    assert.equal(response.status, 500);
+    assert.deepEqual((await response.json()).error, { code: 'PERSISTENCE_FAILED', message: '无法保存导入文稿，请检查本机数据目录。', action: '检查数据目录权限后重试。' });
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('发布日期仅保存真实日历日期', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-date-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml.replace('2026年9月19日 10:00', '2026年13月45日') }));
+  try {
+    const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 0, confirmed: false });
+    assert.equal(response.status, 200);
+    assert.equal((await response.json()).document.publishedAt, '');
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('抓取期间的修订冲突返回稳定错误且不覆盖较新文稿', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-conflict-'));
   const dataDir = path.join(root, '.data');
@@ -152,12 +191,12 @@ test('工作台取消替换不请求导入，成功导入更新字段和预览�
   let fetches = 0;
   const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => {
     fetches++;
-    return mode === 'image' ? '<script>var item_show_type=8;</script><div id="js_content"><img src="https://mmbiz.qpic.cn/picture.png"></div>' : articleHtml;
+    return mode === 'image' ? '<script>var item_show_type=8;</script><div id="js_content"><img src="https://fixture.invalid/picture.png"></div>' : articleHtml;
   } }));
   const browser = await chromium.launch({ ...browserOptions(), headless: true });
   try {
     await seed(server.base);
-    const page = await browser.newPage();
+    const page = await fixturePage(browser);
     await page.goto(server.base + '/typesetting');
     await page.getByLabel('导入公众号文章链接').fill(articleUrl);
     page.once('dialog', dialog => dialog.dismiss());
@@ -208,7 +247,7 @@ test('工作台在慢导入前先保存待处理编辑，并在抓取期间锁�
   const browser = await chromium.launch({ ...browserOptions(), headless: true });
   try {
     await seed(server.base);
-    const page = await browser.newPage();
+    const page = await fixturePage(browser);
     await page.goto(server.base + '/typesetting');
     await page.getByLabel('Markdown 正文').fill('待保存编辑');
     await page.getByLabel('导入公众号文章链接').fill(articleUrl);
@@ -232,7 +271,7 @@ test('工作台导入会排空级联自动保存，避免使用旧修订号自�
   const browser = await chromium.launch({ ...browserOptions(), headless: true });
   try {
     await seed(server.base);
-    const page = await browser.newPage();
+    const page = await fixturePage(browser);
     let releaseFirst;
     let firstStarted;
     const firstSave = new Promise(resolve => { firstStarted = resolve; });
@@ -255,6 +294,37 @@ test('工作台导入会排空级联自动保存，避免使用旧修订号自�
     }));
     assert.ok(saves >= 2);
     assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.title, '可导入文章');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('导入前保存失败只尝试一次，恢复编辑控件并保留文稿', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-save-failure-ui-'));
+  const dataDir = path.join(root, '.data');
+  let importRequests = 0;
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => { importRequests++; return articleHtml; } }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    let saves = 0;
+    await page.route('**/api/typesetting/document', async route => {
+      if (route.request().method() !== 'POST') return route.continue();
+      saves++;
+      await route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: '磁盘不可写' }) });
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.getByLabel('Markdown 正文').fill('无法保存的新正文');
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    page.once('dialog', dialog => dialog.accept());
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await page.getByText('当前编辑未能保存', { exact: false }).waitFor();
+    await page.waitForTimeout(120);
+    assert.equal(saves, 1);
+    assert.equal(importRequests, 0);
+    assert.equal(await page.getByLabel('Markdown 正文').isDisabled(), false);
+    assert.equal(await page.getByRole('button', { name: '导入文章' }).isDisabled(), false);
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '无法保存的新正文');
+    assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.body, '原有正文');
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 

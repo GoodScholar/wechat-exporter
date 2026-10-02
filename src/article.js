@@ -59,7 +59,7 @@ export function parseArticle(html, url) {
     if (/账号已迁移|帐号已迁移/.test(text)) articleError('UNSUPPORTED_MESSAGE', '公众号账号已迁移，请在微信中打开文章并复制迁移后的新链接');
     if (/验证|环境异常|访问过于频繁/.test(text)) articleError('ACCESS_VERIFICATION', '微信要求访问验证。请完成浏览器验证后重试');
     if (/已被.*删除|内容已删除|内容无法查看|该内容已被|已被屏蔽/.test(text)) articleError('ARTICLE_UNAVAILABLE', '文章已删除或无法查看，请在微信中确认链接');
-    if (body.length) articleError('EMPTY_BODY', '文章正文为空，暂时无法导入编辑');
+    if (body.length) articleError('EMPTY_BODY', '未找到可导出的正文，可能是访问受限或暂不支持的消息类型');
     articleError('UNSUPPORTED_MESSAGE', '未找到文章正文，可能是访问受限或暂不支持的消息类型');
   }
   const title = $('#activity-name').text().trim() || $('meta[property="og:title"]').attr('content') || $('title').text().trim() || '未命名文章';

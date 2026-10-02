@@ -61,6 +61,10 @@ test('清理脚本和互动内容后没有正文时，不得导出只有标题�
   assert.throws(() => parseArticle(html, 'https://mp.weixin.qq.com/s/empty-content'), /正文|消息类型/);
 });
 
+test('空正文保持文章导出中性错误文案，不泄漏排版导入语义', () => {
+  assert.throws(() => parseArticle('<div id="js_content"></div>', 'https://mp.weixin.qq.com/s/empty'), /未找到可导出的正文/);
+});
+
 test('图片消息类型证据保留给调用方决策，文章导出仍可读取图片正文', () => {
   const html = '<script>var item_show_type = 8;</script><h1 id="activity-name">图片消息</h1><div id="js_content"><img src="https://mmbiz.qpic.cn/picture.png"></div>';
   assert.match(parseArticle(html, 'https://mp.weixin.qq.com/s/image-message').content, /mmbiz\.qpic\.cn/);

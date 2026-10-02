@@ -8,6 +8,7 @@ let saveTimer;
 let previewTimer;
 let saving = false;
 let savingPromise;
+let saveError;
 let dirty = false;
 let changeVersion = 0;
 let previewVersion = 0;
@@ -16,8 +17,9 @@ function setStatus(status, message = '') { $('#save-status').textContent = statu
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
 function hasContent() { return Object.values(fields).some(input => input.value.trim()); }
 function showImportMessage(error) {
-  importMessage.textContent = [error.message, error.action].filter(Boolean).join(' ');
-  if (error.code === 'IMAGE_MESSAGE' || error.code === 'UNSUPPORTED_MESSAGE') {
+  const details = typeof error === 'string' ? { message: error } : error || {};
+  importMessage.textContent = [details.message || '导入失败，请重试。', details.action].filter(Boolean).join(' ');
+  if (details.code === 'IMAGE_MESSAGE' || details.code === 'UNSUPPORTED_MESSAGE') {
     importMessage.append(' ');
     const link = document.createElement('a');
     link.href = '/';
@@ -37,6 +39,7 @@ async function save() {
   if (saving) return savingPromise;
   if (!dirty) return;
   saving = true; dirty = false; collect(); setStatus('保存中');
+  saveError = undefined;
   const version = changeVersion;
   const next = { ...documentModel, revision: documentModel.revision + 1 };
   let saved = false;
@@ -49,6 +52,7 @@ async function save() {
     if (changeVersion === version) { documentModel = result.document; setStatus('已保存'); }
     else { dirty = true; setStatus('保存中'); }
   } catch (error) {
+    saveError = error;
     dirty = true;
     setStatus('未保存', error.status === 409
       ? '文稿已在其他页面更新。请复制当前内容后重新载入页面，再决定如何合并。'
@@ -59,9 +63,13 @@ async function save() {
 function scheduleSave() { clearTimeout(saveTimer); setStatus('未保存'); saveTimer = setTimeout(() => { void save(); }, 500); }
 async function flushSave() {
   clearTimeout(saveTimer);
-  while (saving || dirty) await (saving ? savingPromise : save());
+  while (saving || dirty) {
+    await (saving ? savingPromise : save());
+    if (saveError) return false;
+  }
+  return true;
 }
-for (const input of Object.values(fields)) input.addEventListener('input', () => { collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
 document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) void save(); });
 importForm.addEventListener('submit', async event => {
   event.preventDefault();
@@ -71,8 +79,7 @@ importForm.addEventListener('submit', async event => {
   button.disabled = true;
   for (const input of Object.values(fields)) input.disabled = true;
   try {
-    await flushSave();
-    if (dirty) throw { message: '当前编辑尚未保存，请先处理保存错误后再导入。' };
+    if (!await flushSave()) throw { message: '当前编辑未能保存，未开始导入。', action: '检查数据目录后继续编辑或重试保存。' };
     importMessage.textContent = '正在读取文章…';
     const response = await fetch('/api/typesetting/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: importUrl.value, revision: documentModel.revision, confirmed: replacing }) });
     const result = await response.json();
