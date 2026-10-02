@@ -4,6 +4,8 @@ const themeControls = { theme: $('#document-theme'), primaryColor: $('#theme-pri
 const importForm = $('#article-import');
 const importUrl = $('#import-url');
 const importMessage = $('#import-message');
+const themeNames = [...themeControls.theme.options].map(option => option.value);
+const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
 const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
 let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings() };
 let saveTimer;
@@ -21,12 +23,27 @@ let activeRichPaste;
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
 function currentThemeSettings() { return documentModel.themeSettings[documentModel.theme]; }
+function hasExactKeys(value, keys) { return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)); }
+function isKnownOption(control, value) { return [...control.options].some(option => option.value === value); }
+function isCompleteThemeSettings(themeSettings) {
+  return hasExactKeys(themeSettings, themeNames) && themeNames.every(theme => hasExactKeys(themeSettings[theme], themeSettingNames)
+    && themeSettingNames.every(name => isKnownOption(themeControls[name], themeSettings[theme][name])));
+}
+function isCompleteDocument(document) {
+  return typeof document === 'object' && document !== null && fields && Object.keys(fields).every(name => typeof document[name] === 'string')
+    && Number.isSafeInteger(document.revision) && document.revision >= 0 && typeof document.savedAt === 'string'
+    && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings);
+}
+function isValidPresentation(presentation) {
+  return typeof presentation === 'object' && presentation !== null && isKnownOption(themeControls.theme, presentation.theme)
+    && hasExactKeys(presentation.settings, themeSettingNames)
+    && themeSettingNames.every(name => isKnownOption(themeControls[name], presentation.settings[name]));
+}
 function syncThemeControls() {
   themeControls.theme.value = documentModel.theme;
-  for (const name of ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']) themeControls[name].value = currentThemeSettings()[name];
+  for (const name of themeSettingNames) themeControls[name].value = currentThemeSettings()[name];
 }
-function applyPresentation(presentation) {
-  const preview = $('#preview');
+function applyPresentation(preview, presentation) {
   preview.classList.remove(...[...preview.classList].filter(name => name.startsWith('typeset-theme-')));
   preview.classList.add(`typeset-theme-${presentation.theme}`);
   preview.style.setProperty('--md-primary-color', presentation.settings.primaryColor);
@@ -35,7 +52,9 @@ function applyPresentation(presentation) {
   preview.style.setProperty('--md-block-spacing', presentation.settings.blockSpacing);
 }
 function hydrateDocument(document) {
-  documentModel = { ...documentModel, ...document, theme: document.theme || 'default', themeSettings: document.themeSettings || defaultThemeSettings() };
+  if (!isCompleteDocument(document)) return false;
+  documentModel = document;
+  return true;
 }
 function hasContent() { return Object.values(fields).some(input => input.value.trim()); }
 function showImportMessage(error) {
@@ -53,9 +72,17 @@ async function preview(version) {
   const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() } }) });
   if (!response.ok) return;
   const rendered = await response.json();
-  if (version === previewVersion) {
-    $('#preview').innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
-    applyPresentation(rendered.presentation);
+  if (version === previewVersion && typeof rendered?.html === 'string' && isValidPresentation(rendered.presentation)) {
+    const preview = $('#preview');
+    const previous = { html: preview.innerHTML, className: preview.className, style: preview.getAttribute('style') };
+    try {
+      preview.innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
+      applyPresentation(preview, rendered.presentation);
+    } catch {
+      preview.innerHTML = previous.html;
+      preview.className = previous.className;
+      if (previous.style === null) preview.removeAttribute('style'); else preview.setAttribute('style', previous.style);
+    }
   }
 }
 function schedulePreview() { const version = ++previewVersion; clearTimeout(previewTimer); previewTimer = setTimeout(() => { void preview(version); }, 180); }
@@ -72,9 +99,10 @@ async function save() {
     const response = await fetch('/api/typesetting/document', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(next) });
     const result = await response.json();
     if (!response.ok) { const error = new Error(result.error || '保存失败'); error.status = response.status; throw error; }
+    if (!isCompleteDocument(result.document)) throw new Error('服务返回了不完整的文稿。');
     documentModel.revision = result.document.revision;
     saved = true;
-    if (changeVersion === version) { documentModel = result.document; setStatus('已保存'); }
+    if (changeVersion === version) { hydrateDocument(result.document); setStatus('已保存'); }
     else { dirty = true; setStatus('保存中'); }
   } catch (error) {
     saveError = error;
@@ -100,7 +128,7 @@ themeControls.theme.addEventListener('change', () => {
   syncThemeControls();
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
-for (const name of ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']) themeControls[name].addEventListener('change', () => {
+for (const name of themeSettingNames) themeControls[name].addEventListener('change', () => {
   currentThemeSettings()[name] = themeControls[name].value;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
@@ -187,7 +215,7 @@ importForm.addEventListener('submit', async event => {
     if (!response.ok) throw result.error || { message: '导入失败，请重试。' };
     clearTimeout(saveTimer);
     dirty = false;
-    hydrateDocument(result.document);
+    if (!hydrateDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
     for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
     syncThemeControls();
     schedulePreview();
