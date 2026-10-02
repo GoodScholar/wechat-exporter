@@ -18,6 +18,15 @@ async function post(base, route, body) {
   return fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
 
+const historyShortcut = (platform, redo = false) => `${platform === 'darwin' ? 'Meta' : 'Control'}+${redo ? 'Shift+' : ''}Z`;
+
+test('浏览器原生撤销快捷键按宿主平台映射', () => {
+  assert.equal(historyShortcut('darwin'), 'Meta+Z');
+  assert.equal(historyShortcut('darwin', true), 'Meta+Shift+Z');
+  assert.equal(historyShortcut('linux'), 'Control+Z');
+  assert.equal(historyShortcut('linux', true), 'Control+Shift+Z');
+});
+
 test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过时修订不会覆盖较新正文', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-'));
   const dataDir = path.join(root, '.data');
@@ -481,9 +490,9 @@ test('富文本插入进入原生撤销栈，转义标签不触发外部资源�
     assert.equal(await page.locator('#preview img').count(), 0);
     assert.equal(resourceRequests, 0);
     await page.getByLabel('Markdown 正文').focus();
-    await page.keyboard.press('Meta+Z');
+    await page.keyboard.press(historyShortcut(process.platform));
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
-    await page.keyboard.press('Meta+Shift+Z');
+    await page.keyboard.press(historyShortcut(process.platform, true));
     assert.match(await page.getByLabel('Markdown 正文').inputValue(), /tracker\.invalid/);
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
