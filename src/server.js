@@ -74,8 +74,9 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     }
   });
   app.post('/api/typesetting/render', (req, res) => {
+    if (typeof req.body !== 'object' || req.body === null || Array.isArray(req.body) || Object.keys(req.body).length !== 3 || !['body', 'theme', 'settings'].every(key => Object.prototype.hasOwnProperty.call(req.body, key))) throw new Error('排版预览请求无效');
     if (typeof req.body?.body !== 'string') throw new Error('Markdown 正文必须是文本');
-    res.json(renderTypesettingMarkdown(req.body.body));
+    res.json(renderTypesettingMarkdown(req.body.body, { theme: req.body?.theme, settings: req.body?.settings }));
   });
   app.get('/api/settings', (req, res) => res.json({ outputDirectory: store.getOutputDirectory() }));
   app.post('/api/settings', (req, res) => res.json({ outputDirectory: store.setOutputDirectory(req.body.outputDirectory) }));

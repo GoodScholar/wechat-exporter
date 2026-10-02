@@ -67,7 +67,7 @@ export async function importTypesettingDocument({ typesetting, fetchArticle, url
     mapArticleError(error);
   }
   rejectUnsupportedMessageType(messageType);
-  const candidate = { title: article.title, author: article.author, account: article.account, publishedAt: normalizePublishedAt(article.date), body: renderArticleBodyMarkdown(article), revision: revision + 1 };
+  const candidate = { title: article.title, author: article.author, account: article.account, publishedAt: normalizePublishedAt(article.date), body: renderArticleBodyMarkdown(article), theme: current.theme, themeSettings: current.themeSettings, revision: revision + 1 };
   try { return await typesetting.save(candidate); }
   catch (error) {
     if (error.status === 409) fail('REVISION_CONFLICT', 409, '文稿已在其他页面更新，请刷新后重试。', '刷新页面后重新导入。');

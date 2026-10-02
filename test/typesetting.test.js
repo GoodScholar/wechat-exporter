@@ -1,12 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
 import { chromium } from 'playwright';
 import { createApp } from '../src/server.js';
 import { browserOptions } from '../src/browser.js';
-import { TypesettingStore } from '../src/typesetting.js';
+import { createDefaultThemeSettings, normalizeTypesettingPresentation, renderTypesettingMarkdown, TypesettingStore, typesettingThemeNames } from '../src/typesetting.js';
 
 async function serve(app) {
   const server = app.listen(0, '127.0.0.1');
@@ -19,6 +19,120 @@ async function post(base, route, body) {
 }
 
 const historyShortcut = (platform, redo = false) => `${platform === 'darwin' ? 'Meta' : 'Control'}+${redo ? 'Shift+' : ''}Z`;
+
+const expectedThemeSettings = {
+  default: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' },
+  grace: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' },
+  simple: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }
+};
+
+const documentWithTheme = (overrides = {}) => ({
+  title: '主题文稿', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '正文',
+  theme: 'default', themeSettings: createDefaultThemeSettings(), revision: 1, ...overrides
+});
+
+const representativeMarkdown = `# 一级标题
+
+一段含有 *强调* 的文字和[链接](https://example.com)。
+
+- 列表一
+- 列表二
+
+> 引用文字
+
+\`\`\`js
+const answer = 42;
+\`\`\`
+
+![图片](https://example.com/image.png)
+
+---
+
+| 表头 A | 表头 B |
+| --- | --- |
+| 单元格 A | 单元格 B |`;
+
+test('三套主题对代表性 Markdown 生成完全相同的语义 HTML', () => {
+  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown(representativeMarkdown, {
+    theme,
+    settings: expectedThemeSettings[theme]
+  }));
+  assert.ok(renders[0].html.includes('<h1>一级标题</h1>'));
+  assert.ok(renders[0].html.includes('<table>'));
+  assert.deepEqual(renders.map(render => render.html), [renders[0].html, renders[0].html, renders[0].html]);
+  assert.deepEqual(renders.map(render => render.presentation), typesettingThemeNames.map(theme => ({
+    theme,
+    settings: expectedThemeSettings[theme]
+  })));
+});
+
+test('预览 presentation 拒绝顶层额外键', () => {
+  const presentation = { theme: 'default', settings: expectedThemeSettings.default };
+  for (const extra of [{ extra: 'ignored' }, { customCss: 'body{display:none}' }]) {
+    assert.throws(() => normalizeTypesettingPresentation({ ...presentation, ...extra }), error => error.status === 400);
+  }
+});
+
+test('预览 API 拒绝顶层 customCss', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-top-level-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const response = await post(server.base, '/api/typesetting/render', {
+      body: representativeMarkdown,
+      theme: 'default',
+      settings: expectedThemeSettings.default,
+      customCss: 'body{display:none}'
+    });
+    assert.equal(response.status, 400);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-presentation-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const settings = { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' };
+    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings });
+    assert.equal(accepted.status, 200);
+    const payload = await accepted.json();
+    assert.deepEqual(payload.presentation, { theme: 'grace', settings });
+    assert.deepEqual(Object.keys(payload).sort(), ['html', 'presentation']);
+
+    const invalidPresentations = [
+      { body: representativeMarkdown, theme: 'unknown', settings },
+      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' } }
+    ];
+    for (const body of invalidPresentations) assert.equal((await post(server.base, '/api/typesetting/render', body)).status, 400);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('三套主题样式全部作用域化且不加载外部资源', async () => {
+  const css = await readFile(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
+  for (const theme of typesettingThemeNames) {
+    assert.match(css, new RegExp(`\\.typeset-preview\\.typeset-theme-${theme}`));
+    assert.match(css, new RegExp(`\\.typeset-preview\\.typeset-theme-${theme} h[1-3]`));
+  }
+  for (const variable of ['--md-primary-color', '--md-font-size', '--md-line-height', '--md-block-spacing']) assert.match(css, new RegExp(variable));
+  assert.doesNotMatch(css, /@import|@font-face|<script|https?:\/\/|url\(/i);
+  assert.doesNotMatch(css, /(^|,|})\s*(?:h[1-6]|p|blockquote|ul|ol|li|pre|code|img|a|hr|table|th|td)\b/m);
+});
+
+test('第三方说明记录三套主题、设置来源、固定提交和许可证', async () => {
+  const notices = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
+  for (const source of [
+    'packages/shared/src/configs/theme-css/default.css',
+    'packages/shared/src/configs/theme-css/grace.css',
+    'packages/shared/src/configs/theme-css/simple.css',
+    'packages/shared/src/configs/style.ts',
+    'apps/web/src/stores/theme.ts',
+    'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
+    'WTFPL v2'
+  ]) assert.match(notices, new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(notices, /主色|字号|行距|段间距/);
+});
 
 test('浏览器原生撤销快捷键按宿主平台映射', () => {
   assert.equal(historyShortcut('darwin'), 'Meta+Z');
@@ -37,9 +151,16 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     assert.match(exportPage, /公众号排版/);
     assert.doesNotMatch(exportPage, /素材|发布/);
     const initial = await (await fetch(server.base + '/api/typesetting/document')).json();
-    assert.deepEqual(initial.document, { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '' });
+    assert.deepEqual(initial.document, {
+      title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '',
+      theme: 'default', themeSettings: expectedThemeSettings
+    });
     const unsafe = '# 标题\n\n<script>alert(1)</script><img src="javascript:alert(1)" onerror="alert(2)">\n\n[危险](javascript:alert(3))';
-    const preview = await (await post(server.base, '/api/typesetting/render', { body: unsafe })).json();
+    const preview = await (await post(server.base, '/api/typesetting/render', {
+      body: unsafe,
+      theme: 'default',
+      settings: expectedThemeSettings.default
+    })).json();
     assert.match(preview.html, /<h1/);
     assert.doesNotMatch(preview.html, /script|onerror|javascript:/i);
     assert.equal((await post(server.base, '/api/typesetting/document', { title: '第一篇', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '较旧的正文', revision: 1 })).status, 200);
@@ -78,6 +199,124 @@ test('首次保存会保留与 current 物理独立的同版本 recovery', async
   } finally { await rm(root, { recursive: true, force: true }); }
 });
 
+test('旧排版文稿补齐三套默认主题并在下次保存后跨重启持久化', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-migration-'));
+  const store = new TypesettingStore(path.join(root, '.data'));
+  const legacy = { title: '旧标题', author: '旧作者', account: '旧公众号', publishedAt: '2026-09-01', body: '旧正文', revision: 1, savedAt: '' };
+  try {
+    assert.deepEqual(typesettingThemeNames, ['default', 'grace', 'simple']);
+    assert.equal(Object.isFrozen(typesettingThemeNames), true);
+    const firstDefaults = createDefaultThemeSettings();
+    const secondDefaults = createDefaultThemeSettings();
+    assert.deepEqual(firstDefaults, expectedThemeSettings);
+    firstDefaults.default.primaryColor = '#009874';
+    assert.equal(firstDefaults.grace.primaryColor, '#0F4C81');
+    assert.equal(secondDefaults.default.primaryColor, '#0F4C81');
+
+    await mkdir(store.dataDir, { recursive: true });
+    await writeFile(store.file, JSON.stringify(legacy), 'utf8');
+    const migrated = await store.load();
+    assert.deepEqual(migrated, { ...legacy, theme: 'default', themeSettings: expectedThemeSettings });
+
+    const saved = await store.save({ ...migrated, revision: 2 });
+    assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('排版文稿拒绝不完整、额外或越界的主题设置且不改变已保存版本', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-validation-'));
+  const dataDir = path.join(root, '.data');
+  const store = new TypesettingStore(dataDir);
+  const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store }));
+  try {
+    const saved = await store.save(documentWithTheme());
+    const manifest = JSON.parse(await readFile(store.manifest, 'utf8'));
+    const persisted = {
+      manifest: await readFile(store.manifest, 'utf8'),
+      current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+      recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+    };
+    const missingSetting = { ...saved.themeSettings.default };
+    delete missingSetting.lineHeight;
+    const invalidDocuments = [
+      { ...saved, revision: 2, themeSettings: undefined },
+      { ...saved, revision: 2, themeSettings: { ...saved.themeSettings, extra: createDefaultThemeSettings().default } },
+      { ...saved, revision: 2, themeSettings: { ...saved.themeSettings, default: missingSetting } },
+      { ...saved, revision: 2, themeSettings: { ...saved.themeSettings, default: { ...saved.themeSettings.default, arbitrary: 'value' } } },
+      { ...saved, revision: 2, themeSettings: { ...saved.themeSettings, default: { ...saved.themeSettings.default, primaryColor: '#FFFFFF' } } }
+    ];
+    for (const document of invalidDocuments) assert.equal((await post(server.base, '/api/typesetting/document', document)).status, 400);
+
+    assert.deepEqual(normalizeTypesettingPresentation({ theme: 'grace', settings: saved.themeSettings.grace }), {
+      theme: 'grace', settings: expectedThemeSettings.grace
+    });
+    for (const presentation of [
+      { theme: 'unknown', settings: saved.themeSettings.default },
+      { theme: 'default', settings: missingSetting },
+      { theme: 'default', settings: { ...saved.themeSettings.default, primaryColor: '#FFFFFF' } }
+    ]) assert.throws(() => normalizeTypesettingPresentation(presentation), error => error.status === 400);
+
+    assert.deepEqual({
+      manifest: await readFile(store.manifest, 'utf8'),
+      current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+      recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+    }, persisted);
+    assert.deepEqual(await new TypesettingStore(dataDir).load(), saved);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('主题及非当前主题设置参与修订冲突和内容相等判断', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-revision-'));
+  const store = new TypesettingStore(path.join(root, '.data'));
+  try {
+    const saved = await store.save(documentWithTheme());
+    assert.equal(await store.save({ ...saved }), saved);
+    await assert.rejects(store.save({ ...saved, theme: 'grace' }), error => error.status === 409);
+    const changedNonCurrentTheme = createDefaultThemeSettings();
+    changedNonCurrentTheme.simple.primaryColor = '#009874';
+    await assert.rejects(store.save({ ...saved, themeSettings: changedNonCurrentTheme }), error => error.status === 409);
+    await assert.rejects(store.save({ ...saved, theme: 'simple', revision: 0 }), error => error.status === 409);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('主题设置写入失败时旧配置仍是内存和重启后的唯一可见状态', async () => {
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-write-failure-'));
+    let failWrites = false;
+    let candidateWrites = 0;
+    const writeAtomically = async (file, text) => {
+      if (failWrites && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if (phase === 'current-version' && candidateWrites === 1 || phase === 'recovery-version' && candidateWrites === 2) throw new Error('disk denied');
+      }
+      if (failWrites && phase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
+      await writeFile(file, text, 'utf8');
+    };
+    const store = new TypesettingStore(path.join(root, '.data'), { writeAtomically });
+    try {
+      const saved = await store.save(documentWithTheme());
+      const manifest = JSON.parse(await readFile(store.manifest, 'utf8'));
+      const persisted = {
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      };
+      const nextSettings = createDefaultThemeSettings();
+      nextSettings.grace.primaryColor = '#FA5151';
+      failWrites = true;
+      candidateWrites = 0;
+      await assert.rejects(store.save({ ...saved, theme: 'grace', themeSettings: nextSettings, revision: 2 }), /disk denied/);
+      assert.deepEqual({
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      }, persisted, phase);
+      assert.deepEqual(await store.load(), saved, phase);
+      assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved, phase);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
 test('慢的旧预览响应不能覆盖较新的预览', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-preview-race-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
@@ -103,6 +342,220 @@ test('慢的旧预览响应不能覆盖较新的预览', async () => {
     await page.waitForTimeout(100);
     assert.equal(await page.getByRole('heading', { name: '第二版' }).count(), 1);
     assert.equal(await page.getByRole('heading', { name: '第一版' }).count(), 0);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('工作台切换三套主题时正文结构不变且即时应用服务端 presentation', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-switch-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.getByLabel('Markdown 正文').fill('# 相同结构\n\n正文');
+    await page.getByRole('heading', { name: '相同结构' }).waitFor({ timeout: 1500 });
+    const html = await page.locator('#preview').innerHTML();
+    for (const [theme, color] of [['grace', '#009874'], ['simple', '#FA5151']]) {
+      await page.locator('#document-theme').selectOption(theme);
+      await page.getByLabel('主色').selectOption(color);
+      await page.waitForFunction(({ theme, color }) => {
+        const preview = document.querySelector('#preview');
+        return preview.classList.contains(`typeset-theme-${theme}`) && preview.style.getPropertyValue('--md-primary-color') === color;
+      }, { theme, color });
+      assert.equal(await page.locator('#preview').innerHTML(), html);
+      assert.equal(await page.locator('#document-theme').inputValue(), theme);
+    }
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('每套主题独立记忆四项设置并只重置当前主题', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-isolation-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.getByLabel('主色').selectOption('#009874');
+    await page.getByLabel('字号').selectOption('18px');
+    await page.locator('#document-theme').selectOption('grace');
+    assert.equal(await page.getByLabel('主色').inputValue(), '#0F4C81');
+    await page.getByLabel('行距').selectOption('2.05');
+    await page.getByRole('button', { name: '恢复当前主题默认值' }).click();
+    assert.equal(await page.getByLabel('行距').inputValue(), '1.75');
+    await page.locator('#document-theme').selectOption('default');
+    assert.equal(await page.getByLabel('主色').inputValue(), '#009874');
+    assert.equal(await page.getByLabel('字号').inputValue(), '18px');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('主题设置自动保存并在刷新和服务重启后恢复', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-persistence-'));
+  const dataDir = path.join(root, '.data');
+  let server = await serve(createApp({ dataDir, interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    const saves = [];
+    await page.route('**/api/typesetting/document', async route => {
+      if (route.request().method() === 'POST') saves.push(route.request().postDataJSON());
+      await route.continue();
+    });
+    await page.goto(server.base + '/typesetting');
+    const saved = page.waitForResponse(response => response.url().endsWith('/api/typesetting/document') && response.request().method() === 'POST' && response.ok());
+    await page.locator('#document-theme').selectOption('simple');
+    await page.getByLabel('段间距').selectOption('1.35');
+    await saved;
+    assert.deepEqual(saves.at(-1).themeSettings.default, expectedThemeSettings.default);
+    assert.equal(saves.at(-1).themeSettings.simple.blockSpacing, '1.35');
+    await page.reload();
+    await page.locator('#document-theme').waitFor();
+    assert.equal(await page.locator('#document-theme').inputValue(), 'simple');
+    assert.equal(await page.getByLabel('段间距').inputValue(), '1.35');
+    await server.close();
+    server = await serve(createApp({ dataDir, interval: 0 }));
+    await page.goto(server.base + '/typesetting');
+    await page.locator('#document-theme').waitFor();
+    assert.equal(await page.locator('#document-theme').inputValue(), 'simple');
+    assert.equal(await page.getByLabel('段间距').inputValue(), '1.35');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('慢的旧主题预览不会覆盖较新的主题类和变量', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-preview-race-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    let releaseFirst;
+    let firstReached;
+    const first = new Promise(resolve => { firstReached = resolve; });
+    let renders = 0;
+    await page.route('**/api/typesetting/render', async route => {
+      const response = await route.fetch();
+      if (renders++ === 0) { firstReached(); await new Promise(resolve => { releaseFirst = resolve; }); }
+      await route.fulfill({ response });
+    });
+    await page.locator('#document-theme').selectOption('grace');
+    await first;
+    await page.locator('#document-theme').selectOption('simple');
+    await page.waitForFunction(() => {
+      const preview = document.querySelector('#preview');
+      return preview.classList.contains('typeset-theme-simple') && preview.style.getPropertyValue('--md-primary-color') === '#0F4C81';
+    });
+    releaseFirst();
+    await page.waitForTimeout(100);
+    const presentation = await page.locator('#preview').evaluate(preview => ({
+      classes: [...preview.classList].filter(name => name.startsWith('typeset-theme-')),
+      primaryColor: preview.style.getPropertyValue('--md-primary-color')
+    }));
+    assert.deepEqual(presentation, { classes: ['typeset-theme-simple'], primaryColor: '#0F4C81' });
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('工作台不会静默水合缺失主题设置的文稿响应', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-hydration-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    const previews = [];
+    await page.route('**/api/typesetting/document', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ document: { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'grace' } })
+    }));
+    await page.route('**/api/typesetting/render', async route => {
+      previews.push(route.request().postDataJSON());
+      await route.continue();
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    assert.equal(await page.locator('#document-theme').inputValue(), 'default');
+    assert.equal(await page.getByLabel('主色').inputValue(), '#0F4C81');
+    assert.deepEqual(previews.map(request => request.theme), ['default']);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('畸形的预览 200 不会部分覆盖上一份主题 presentation', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-preview-malformed-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.locator('#document-theme').selectOption('grace');
+    await page.getByLabel('主色').selectOption('#009874');
+    await page.waitForFunction(() => document.querySelector('#preview').classList.contains('typeset-theme-grace'));
+    const before = await page.locator('#preview').evaluate(preview => ({ html: preview.innerHTML, className: preview.className, style: preview.getAttribute('style') }));
+    await page.route('**/api/typesetting/render', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ html: '<h1>不应显示</h1>', presentation: { theme: 'simple', settings: { primaryColor: '#FA5151' } } })
+    }));
+    await page.locator('#document-theme').selectOption('simple');
+    await page.waitForTimeout(300);
+    assert.deepEqual(await page.locator('#preview').evaluate(preview => ({ html: preview.innerHTML, className: preview.className, style: preview.getAttribute('style') })), before);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('文章导入和富文本粘贴不会重置或污染主题设置', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-content-regression-'));
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'), interval: 0,
+    fetchArticle: async () => '<html><head><meta property="og:title" content="导入标题"></head><body><div id="js_content"><p>导入正文</p></div></body></html>'
+  }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    const saved = page.waitForResponse(response => response.url().endsWith('/api/typesetting/document') && response.request().method() === 'POST' && response.ok());
+    await page.locator('#document-theme').selectOption('grace');
+    await page.getByLabel('主色').selectOption('#FECE00');
+    await page.getByLabel('Markdown 正文').fill('导入前正文');
+    await saved;
+    let releaseImport;
+    let importReached;
+    const reached = new Promise(resolve => { importReached = resolve; });
+    await page.route('**/api/typesetting/import', async route => {
+      const response = await route.fetch();
+      importReached();
+      await new Promise(resolve => { releaseImport = resolve; });
+      await route.fulfill({ response });
+    });
+    await page.evaluate(() => { window.confirm = () => true; });
+    await page.getByLabel('导入公众号文章链接').fill('https://mp.weixin.qq.com/s/local');
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await reached;
+    assert.equal(await page.locator('#document-theme').isDisabled(), true);
+    for (const label of ['主色', '字号', '行距', '段间距']) assert.equal(await page.getByLabel(label).isDisabled(), true);
+    assert.equal(await page.getByRole('button', { name: '恢复当前主题默认值' }).isDisabled(), true);
+    releaseImport();
+    await page.getByText('文章已导入', { exact: false }).waitFor();
+    assert.equal(await page.locator('#document-theme').inputValue(), 'grace');
+    assert.equal(await page.getByLabel('主色').inputValue(), '#FECE00');
+    const beforePaste = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    const savedPaste = page.waitForResponse(response => response.url().endsWith('/api/typesetting/document') && response.request().method() === 'POST' && response.ok());
+    assert.equal((await dispatchPaste(page, { html: '<p><strong>粘贴正文</strong></p>' })).defaultPrevented, true);
+    await page.getByText('已转换富文本', { exact: false }).waitFor();
+    await savedPaste;
+    const afterPaste = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    assert.equal(await page.locator('#document-theme').inputValue(), 'grace');
+    assert.equal(await page.getByLabel('主色').inputValue(), '#FECE00');
+    assert.equal(afterPaste.theme, beforePaste.theme);
+    assert.deepEqual(afterPaste.themeSettings, beforePaste.themeSettings);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('主题设置在窄屏可操作且页面不产生横向溢出', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-theme-mobile-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage({ viewport: { width: 390, height: 844 } });
+    await page.goto(server.base + '/typesetting');
+    await page.locator('#document-theme').selectOption('simple');
+    await page.getByLabel('字号').selectOption('14px');
+    assert.equal(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), true);
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
@@ -190,7 +643,7 @@ test('工作台约 500ms 自动保存、预览防抖、页面隐藏刷新并展�
     await page.getByLabel('Markdown 正文').fill('# 新文稿');
     await page.getByText('已保存', { exact: true }).waitFor({ timeout: 2000 });
     await page.getByRole('heading', { name: '新文稿' }).waitFor();
-    assert.equal(await page.getByRole('heading', { name: '新文稿' }).evaluate(element => getComputedStyle(element).borderBottomColor), 'rgb(22, 114, 77)');
+    assert.equal(await page.getByRole('heading', { name: '新文稿' }).evaluate(element => getComputedStyle(element).borderBottomColor), 'rgb(15, 76, 129)');
     await page.getByLabel('Markdown 正文').fill('# 隐藏刷新');
     await page.evaluate(() => { Object.defineProperty(document, 'hidden', { configurable: true, get: () => true }); document.dispatchEvent(new Event('visibilitychange')); });
     await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1000 });
@@ -201,7 +654,7 @@ test('工作台约 500ms 自动保存、预览防抖、页面隐藏刷新并展�
 test('工作台保存失败时保留未保存状态并给出可操作提示', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-failure-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0, typesettingStore: {
-    load: async () => ({ title: '', author: '', account: '', publishedAt: '', body: '', revision: 0 }),
+    load: async () => documentWithTheme({ title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '' }),
     save: async () => { throw new Error('磁盘不可写'); }
   } }));
   const browser = await chromium.launch({ ...browserOptions(), headless: true });
