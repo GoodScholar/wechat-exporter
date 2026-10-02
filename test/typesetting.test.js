@@ -373,6 +373,62 @@ test('多段富文本插入选区时保留两侧 Markdown 块边界', async () =
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('单块和不同既有换行的富文本插入均保留两侧块边界', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-boundaries-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.evaluate(() => { window.confirm = () => true; });
+    for (const scenario of [
+      { body: '甲乙丙', start: 1, end: 2, html: '<p>单段</p>', expected: '甲\n\n单段\n\n丙' },
+      { body: '甲乙丙', start: 1, end: 2, html: '<div>单块</div>', expected: '甲\n\n单块\n\n丙' },
+      { body: '甲\n乙\n丙', start: 2, end: 3, html: '<p>第一段</p><p>第二段</p>', expected: '甲\n\n第一段\n\n第二段\n\n丙' },
+      { body: '甲\n\n乙\n\n丙', start: 3, end: 4, html: '<table><tr><td>表格</td></tr></table>', expected: '甲\n\n<table><tbody><tr><td>表格</td></tr></tbody></table>\n\n丙' }
+    ]) {
+      await page.getByLabel('Markdown 正文').fill(scenario.body);
+      await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+      await page.evaluate(({ start, end }) => document.querySelector('#document-body').setSelectionRange(start, end), scenario);
+      assert.equal((await dispatchPaste(page, { html: scenario.html })).defaultPrevented, true);
+      await page.waitForFunction(expected => document.querySelector('#document-body').value === expected, scenario.expected);
+    }
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本转换期间 selection 移开再恢复仍会丢弃旧响应', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-selection-aba-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    let release;
+    let requestReached;
+    const held = new Promise(resolve => { release = resolve; });
+    const reached = new Promise(resolve => { requestReached = resolve; });
+    await page.route('**/api/typesetting/rich-text', async route => {
+      requestReached();
+      const response = await route.fetch();
+      await held;
+      await route.fulfill({ response });
+    });
+    assert.equal((await dispatchPaste(page, { html: '<strong>旧结果</strong>' })).defaultPrevented, true);
+    await reached;
+    await page.evaluate(() => { window.selectionEvents = 0; document.querySelector('#document-body').addEventListener('select', () => { window.selectionEvents++; }, { once: true }); document.querySelector('#document-body').setSelectionRange(0, 0); });
+    await page.waitForFunction(() => window.selectionEvents === 1);
+    await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 2));
+    release();
+    await page.getByText('正文或选区已变化，请重新粘贴后重试。', { exact: true }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('富文本插入进入原生撤销栈，转义标签不触发外部资源请求', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-undo-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));

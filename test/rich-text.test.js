@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import { mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
-import { convertRichText, RichTextError } from '../src/rich-text.js';
+import { convertRichText, RichTextError, richTextErrorCodes } from '../src/rich-text.js';
 import { createApp } from '../src/server.js';
 
 async function serve(app) {
@@ -73,6 +73,19 @@ test('特殊媒体从子资源或 data 属性保留安全来源 URL', () => {
   ]);
   assert.match(result.markdown, /来源：https:\/\/example\.test\/movie\.mp4/);
   assert.match(result.markdown, /来源：https:\/\/example\.test\/embed/);
+});
+
+test('特殊媒体来源 URL 保留命名实体样式查询参数，错误 code 由集中常量提供', () => {
+  const result = convertRichText('<video src="https://example.test/v?x=1&copy=2"></video><audio><source src="https://example.test/a?x=1&not=2"></audio><object data="https://example.test/o?x=1&copy=2"></object>');
+  assert.deepEqual(result.downgraded.map(item => item.sourceUrl), [
+    'https://example.test/v?x=1&copy=2',
+    'https://example.test/a?x=1&not=2',
+    'https://example.test/o?x=1&copy=2'
+  ]);
+  assert.match(result.markdown, /https:\/\/example\.test\/v\?x=1&copy=2/);
+  assert.match(result.markdown, /https:\/\/example\.test\/a\?x=1&not=2/);
+  assert.match(result.markdown, /https:\/\/example\.test\/o\?x=1&copy=2/);
+  assert.equal(richTextErrorCodes.RICH_TEXT_TOO_LARGE, 'RICH_TEXT_TOO_LARGE');
 });
 
 test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构且不保存文稿', async () => {

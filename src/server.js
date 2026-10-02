@@ -11,7 +11,7 @@ import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
 import { TypesettingStore, renderTypesettingMarkdown } from './typesetting.js';
 import { importTypesettingDocument, TypesettingImportError } from './typesetting-import.js';
-import { convertRichText, RichTextError } from './rich-text.js';
+import { convertRichText, RichTextError, richTextErrorCodes } from './rich-text.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
@@ -131,7 +131,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (req.path === '/api/typesetting/rich-text' && error.type === 'entity.too.large') {
-      const typed = new RichTextError('RICH_TEXT_TOO_LARGE');
+      const typed = new RichTextError(richTextErrorCodes.RICH_TEXT_TOO_LARGE);
       return res.status(typed.status).json({ error: typed.toJSON() });
     }
     res.status(error.status === 409 ? 409 : 400).json({ error: error.message || '操作失败，请重试' });

@@ -23,17 +23,23 @@ export const specialContentTypes = [
   { type: 'poll', label: '投票', selector: 'mp-vote, [data-vote-id], [data-type="vote"], [class~="vote_area"]' }
 ];
 
+export const richTextErrorCodes = Object.freeze({
+  INVALID_RICH_TEXT: 'INVALID_RICH_TEXT',
+  EMPTY_RICH_TEXT: 'EMPTY_RICH_TEXT',
+  RICH_TEXT_TOO_LARGE: 'RICH_TEXT_TOO_LARGE'
+});
+
 const errors = {
-  INVALID_RICH_TEXT: [400, '富文本内容无效。', '请重新复制正文后重试。'],
-  EMPTY_RICH_TEXT: [422, '富文本中没有可转换的可读内容。', '请保留正文文字后重试。'],
-  RICH_TEXT_TOO_LARGE: [413, '富文本内容过大，无法安全转换。', '请缩短粘贴内容后重试。']
+  [richTextErrorCodes.INVALID_RICH_TEXT]: [400, '富文本内容无效。', '请重新复制正文后重试。'],
+  [richTextErrorCodes.EMPTY_RICH_TEXT]: [422, '富文本中没有可转换的可读内容。', '请保留正文文字后重试。'],
+  [richTextErrorCodes.RICH_TEXT_TOO_LARGE]: [413, '富文本内容过大，无法安全转换。', '请缩短粘贴内容后重试。']
 };
 
 export class RichTextError extends Error {
   constructor(code) {
     const [status, message, action] = errors[code] || errors.INVALID_RICH_TEXT;
     super(message);
-    this.code = code in errors ? code : 'INVALID_RICH_TEXT';
+    this.code = code in errors ? code : richTextErrorCodes.INVALID_RICH_TEXT;
     this.status = status;
     this.action = action;
   }
@@ -68,7 +74,9 @@ function replaceSpecialContent($, downgraded) {
     if (!definition) continue;
     const source = sourceUrl($, node);
     const text = `[特殊内容：${definition.label}]${source ? ` 来源：${source}` : ''}`;
-    node.replaceWith(`<blockquote><p>${text}</p></blockquote>`);
+    const placeholder = $('<blockquote><p></p></blockquote>');
+    placeholder.find('p').text(text);
+    node.replaceWith(placeholder);
     downgraded.push(source ? { type: definition.type, sourceUrl: source } : { type: definition.type });
   }
 }
@@ -109,6 +117,7 @@ export function convertRichText(html) {
   const downgraded = [];
   replaceSpecialContent($, downgraded);
   removeUnsafeContent($, removed);
+  const block = $('body').find('p, div, section, article, main, header, footer, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table, hr').length > 0;
   const safeHtml = sanitizeHtml($('body').html() || '', {
     allowedTags: ['p', 'br', 'div', 'section', 'article', 'main', 'header', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'del', 's', 'a', 'img', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
     allowedAttributes: { a: ['href', 'title'], img: ['src', 'alt', 'width', 'height'], th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'] },
@@ -118,5 +127,5 @@ export function convertRichText(html) {
   });
   const result = markdownConverter.turndown(safeHtml).trim();
   if (!result) fail('EMPTY_RICH_TEXT');
-  return { markdown: result, removed, downgraded };
+  return { markdown: result, removed, downgraded, block };
 }
