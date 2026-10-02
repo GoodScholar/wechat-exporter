@@ -89,6 +89,23 @@ function preserveBlockBoundaries(markdown, snapshot, block) {
 function noteSelectionChange() {
   if (activeRichPaste && (fields.body.selectionStart !== activeRichPaste.start || fields.body.selectionEnd !== activeRichPaste.end)) activeRichPaste.selectionChanged = true;
 }
+for (const method of ['setSelectionRange', 'select']) {
+  const native = fields.body[method].bind(fields.body);
+  fields.body[method] = (...args) => {
+    const result = native(...args);
+    noteSelectionChange();
+    return result;
+  };
+}
+for (const property of ['selectionStart', 'selectionEnd']) {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, property);
+  if (!descriptor) continue;
+  Object.defineProperty(fields.body, property, {
+    configurable: true,
+    get: () => descriptor.get.call(fields.body),
+    set: value => { descriptor.set.call(fields.body, value); noteSelectionChange(); }
+  });
+}
 fields.body.addEventListener('select', noteSelectionChange);
 document.addEventListener('selectionchange', noteSelectionChange);
 fields.body.addEventListener('paste', async event => {

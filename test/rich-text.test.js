@@ -88,6 +88,19 @@ test('特殊媒体来源 URL 保留命名实体样式查询参数，错误 code 
   assert.equal(richTextErrorCodes.RICH_TEXT_TOO_LARGE, 'RICH_TEXT_TOO_LARGE');
 });
 
+test('嵌套特殊媒体只输出一个有安全来源的可见占位和降级记录', () => {
+  const result = convertRichText('<div class="vote_area">投票<iframe src="https://example.test/vote"></iframe></div><mp-common-videosnap><video src="https://example.test/video.mp4"></video></mp-common-videosnap><div data-type="video"><video><source src="https://example.test/source.mp4"></video></div>');
+  assert.deepEqual(result.downgraded, [
+    { type: 'poll', sourceUrl: 'https://example.test/vote' },
+    { type: 'video', sourceUrl: 'https://example.test/video.mp4' },
+    { type: 'video', sourceUrl: 'https://example.test/source.mp4' }
+  ]);
+  assert.equal(result.markdown.match(/\[特殊内容：/g).length, 3);
+  assert.match(result.markdown, /投票[\s\S]*来源：https:\/\/example\.test\/vote/);
+  assert.match(result.markdown, /视频[\s\S]*来源：https:\/\/example\.test\/video\.mp4/);
+  assert.match(result.markdown, /视频[\s\S]*来源：https:\/\/example\.test\/source\.mp4/);
+});
+
 test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构且不保存文稿', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));

@@ -37,7 +37,7 @@ const errors = {
 
 export class RichTextError extends Error {
   constructor(code) {
-    const [status, message, action] = errors[code] || errors.INVALID_RICH_TEXT;
+    const [status, message, action] = errors[code] || errors[richTextErrorCodes.INVALID_RICH_TEXT];
     super(message);
     this.code = code in errors ? code : richTextErrorCodes.INVALID_RICH_TEXT;
     this.status = status;
@@ -58,7 +58,7 @@ function safeUrl(value, { image = false } = {}) {
 }
 
 function sourceUrl($, element) {
-  for (const node of [element, ...element.find('source').toArray().map(item => $(item))]) {
+  for (const node of [element, ...element.find('*').toArray().map(item => $(item))]) {
     for (const attribute of ['src', 'href', 'data', 'data-src', 'data-url', 'url']) {
       const url = safeUrl(node.attr(attribute));
       if (url) return url;
@@ -68,10 +68,15 @@ function sourceUrl($, element) {
 }
 
 function replaceSpecialContent($, downgraded) {
-  for (const element of $('*').toArray()) {
+  const candidates = $('*').toArray().map(element => {
     const node = $(element);
     const definition = specialContentTypes.find(candidate => node.is(candidate.selector));
+    return { element, definition, nested: node.parents().toArray().some(parent => specialContentTypes.some(candidate => $(parent).is(candidate.selector))) };
+  });
+  for (const { element, definition, nested } of candidates) {
     if (!definition) continue;
+    if (nested) continue;
+    const node = $(element);
     const source = sourceUrl($, node);
     const text = `[特殊内容：${definition.label}]${source ? ` 来源：${source}` : ''}`;
     const placeholder = $('<blockquote><p></p></blockquote>');
@@ -111,7 +116,7 @@ function removeUnsafeContent($, removed) {
 }
 
 export function convertRichText(html) {
-  if (typeof html !== 'string' || !html.trim()) fail('INVALID_RICH_TEXT');
+  if (typeof html !== 'string' || !html.trim()) fail(richTextErrorCodes.INVALID_RICH_TEXT);
   const $ = load(html);
   const removed = [];
   const downgraded = [];
@@ -126,6 +131,6 @@ export function convertRichText(html) {
     allowProtocolRelative: false
   });
   const result = markdownConverter.turndown(safeHtml).trim();
-  if (!result) fail('EMPTY_RICH_TEXT');
+  if (!result) fail(richTextErrorCodes.EMPTY_RICH_TEXT);
   return { markdown: result, removed, downgraded, block };
 }

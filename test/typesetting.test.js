@@ -429,6 +429,40 @@ test('富文本转换期间 selection 移开再恢复仍会丢弃旧响应', asy
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('同一 JavaScript 任务内 selection 移开再恢复仍会丢弃旧富文本响应', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-sync-selection-aba-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.goto(server.base + '/typesetting');
+    await page.waitForTimeout(250);
+    await page.getByLabel('Markdown 正文').fill('甲乙丙');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1500 });
+    await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 2); });
+    let release;
+    let requestReached;
+    const held = new Promise(resolve => { release = resolve; });
+    const reached = new Promise(resolve => { requestReached = resolve; });
+    await page.route('**/api/typesetting/rich-text', async route => {
+      requestReached();
+      const response = await route.fetch();
+      await held;
+      await route.fulfill({ response });
+    });
+    assert.equal((await dispatchPaste(page, { html: '<strong>旧结果</strong>' })).defaultPrevented, true);
+    await reached;
+    await page.evaluate(() => {
+      const body = document.querySelector('#document-body');
+      body.setSelectionRange(0, 0);
+      body.setSelectionRange(1, 2);
+    });
+    release();
+    await page.getByText('正文或选区已变化，请重新粘贴后重试。', { exact: true }).waitFor({ timeout: 1500 });
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('富文本插入进入原生撤销栈，转义标签不触发外部资源请求', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-undo-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
