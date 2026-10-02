@@ -9,6 +9,7 @@ import { exportArticle, fetchResource } from './exporter.js';
 import { createVerificationBrowser } from './browser.js';
 import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
+import { TypesettingStore, renderTypesettingMarkdown } from './typesetting.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
@@ -22,7 +23,7 @@ function openWithSystem(directory) {
   });
 }
 
-export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem } = {}) {
+export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore } = {}) {
   const app = express();
   const verification = createVerificationBrowser(dataDir);
   const store = new JobStore(dataDir, exporter || ((url, formats, context) => exportArticle(url, formats, {
@@ -31,7 +32,9 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   })), interval);
   app.locals.store = store;
   const savedFeeds = new SavedFeeds(dataDir);
+  const typesetting = typesettingStore || new TypesettingStore(dataDir);
   app.locals.verification = verification;
+  app.locals.typesetting = typesetting;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
     if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '仅允许本机访问' });
@@ -40,6 +43,18 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     next();
   });
   app.use(express.json({ limit: '150kb' }));
+  app.get('/api/typesetting/document', async (req, res) => res.json({ document: await typesetting.load() }));
+  app.post('/api/typesetting/document', async (req, res, next) => {
+    try { res.json({ document: await typesetting.save(req.body) }); }
+    catch (error) {
+      if (error.status === 400 || error.status === 409) return res.status(error.status).json({ error: error.message });
+      return res.status(500).json({ error: '无法保存文稿，请检查本机数据目录后重试' });
+    }
+  });
+  app.post('/api/typesetting/render', (req, res) => {
+    if (typeof req.body?.body !== 'string') throw new Error('Markdown 正文必须是文本');
+    res.json(renderTypesettingMarkdown(req.body.body));
+  });
   app.get('/api/settings', (req, res) => res.json({ outputDirectory: store.getOutputDirectory() }));
   app.post('/api/settings', (req, res) => res.json({ outputDirectory: store.setOutputDirectory(req.body.outputDirectory) }));
   app.post('/api/open-directory', async (req, res) => {
@@ -89,10 +104,11 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     res.on('close', () => stream.destroy());
     stream.pipe(res);
   });
+  app.get('/typesetting', (req, res) => res.sendFile('typesetting.html', { root: path.join(root, 'public') }));
   app.use(express.static(path.join(root, 'public')));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
-    res.status(400).json({ error: error.message || '操作失败，请重试' });
+    res.status(error.status === 409 ? 409 : 400).json({ error: error.message || '操作失败，请重试' });
   });
   return app;
 }
