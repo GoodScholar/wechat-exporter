@@ -11,6 +11,7 @@ import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
 import { TypesettingStore, renderTypesettingMarkdown } from './typesetting.js';
 import { importTypesettingDocument, TypesettingImportError } from './typesetting-import.js';
+import { convertRichText, RichTextError, richTextErrorCodes } from './rich-text.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
@@ -62,6 +63,13 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
       res.json({ document });
     } catch (error) {
       if (error instanceof TypesettingImportError) return res.status(error.status).json({ error: error.toJSON() });
+      next(error);
+    }
+  });
+  app.post('/api/typesetting/rich-text', (req, res, next) => {
+    try { res.json(convertRichText(req.body?.html)); }
+    catch (error) {
+      if (error instanceof RichTextError) return res.status(error.status).json({ error: error.toJSON() });
       next(error);
     }
   });
@@ -122,6 +130,10 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.use(express.static(path.join(root, 'public')));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
+    if (req.path === '/api/typesetting/rich-text' && error.type === 'entity.too.large') {
+      const typed = new RichTextError(richTextErrorCodes.RICH_TEXT_TOO_LARGE);
+      return res.status(typed.status).json({ error: typed.toJSON() });
+    }
     res.status(error.status === 409 ? 409 : 400).json({ error: error.message || '操作失败，请重试' });
   });
   return app;

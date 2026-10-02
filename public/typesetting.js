@@ -12,6 +12,9 @@ let saveError;
 let dirty = false;
 let changeVersion = 0;
 let previewVersion = 0;
+let richPastePending = false;
+let richPasteVersion = 0;
+let activeRichPaste;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
@@ -70,6 +73,67 @@ async function flushSave() {
   return true;
 }
 for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+function showRichTextMessage(message = '') { $('#rich-text-message').textContent = message; }
+function richTextError(error) {
+  const details = error || {};
+  return [details.message || '富文本转换失败，请重试。', details.action].filter(Boolean).join(' ');
+}
+function preserveBlockBoundaries(markdown, snapshot, block) {
+  if (!block && !/\n\s*\n|(^|\n)(?:#{1,6}\s|[-*+]\s|\d+\.\s|>|\||```)/.test(markdown)) return markdown;
+  const before = snapshot.body.slice(0, snapshot.start);
+  const after = snapshot.body.slice(snapshot.end);
+  const beforeNewlines = before.match(/\n*$/)[0].length;
+  const afterNewlines = after.match(/^\n*/)[0].length;
+  return `${before ? '\n'.repeat(Math.max(0, 2 - beforeNewlines)) : ''}${markdown}${after ? '\n'.repeat(Math.max(0, 2 - afterNewlines)) : ''}`;
+}
+function noteSelectionChange() {
+  if (activeRichPaste && (fields.body.selectionStart !== activeRichPaste.start || fields.body.selectionEnd !== activeRichPaste.end)) activeRichPaste.selectionChanged = true;
+}
+for (const method of ['setSelectionRange', 'select']) {
+  const native = fields.body[method].bind(fields.body);
+  fields.body[method] = (...args) => {
+    const result = native(...args);
+    noteSelectionChange();
+    return result;
+  };
+}
+for (const property of ['selectionStart', 'selectionEnd']) {
+  const descriptor = Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, property);
+  if (!descriptor) continue;
+  Object.defineProperty(fields.body, property, {
+    configurable: true,
+    get: () => descriptor.get.call(fields.body),
+    set: value => { descriptor.set.call(fields.body, value); noteSelectionChange(); }
+  });
+}
+fields.body.addEventListener('select', noteSelectionChange);
+document.addEventListener('selectionchange', noteSelectionChange);
+fields.body.addEventListener('paste', async event => {
+  const html = event.clipboardData?.getData('text/html')?.trim();
+  if (!html) return;
+  event.preventDefault();
+  if (richPastePending) { showRichTextMessage('正在转换上一段富文本，请稍后再试。'); return; }
+  if (!window.confirm('检测到富文本，将转换为 Markdown 后插入当前选区。是否继续？')) return;
+  const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd, changeVersion, request: ++richPasteVersion, selectionChanged: false };
+  activeRichPaste = snapshot;
+  richPastePending = true;
+  showRichTextMessage('正在安全转换富文本…');
+  try {
+    const response = await fetch('/api/typesetting/rich-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html }) });
+    const result = await response.json();
+    if (!response.ok) throw result.error;
+    if (snapshot.request !== richPasteVersion || snapshot.selectionChanged || changeVersion !== snapshot.changeVersion || fields.body.value !== snapshot.body || fields.body.selectionStart !== snapshot.start || fields.body.selectionEnd !== snapshot.end) {
+      showRichTextMessage('正文或选区已变化，请重新粘贴后重试。');
+      return;
+    }
+    const markdown = preserveBlockBoundaries(result.markdown, snapshot, result.block);
+    fields.body.focus();
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    if (!document.execCommand('insertText', false, markdown)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
+    showRichTextMessage(`已转换富文本${result.removed.length ? `，移除 ${result.removed.length} 项` : ''}${result.downgraded.length ? `，降级 ${result.downgraded.length} 项特殊内容` : ''}。`);
+  } catch (error) { showRichTextMessage(richTextError(error)); }
+  finally { if (activeRichPaste === snapshot) activeRichPaste = undefined; richPastePending = false; }
+});
 document.addEventListener('visibilitychange', () => { if (document.hidden && dirty) void save(); });
 importForm.addEventListener('submit', async event => {
   event.preventDefault();
