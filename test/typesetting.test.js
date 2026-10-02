@@ -44,13 +44,29 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     server = await serve(createApp({ dataDir, interval: 0 }));
     assert.equal((await (await fetch(server.base + '/api/typesetting/document')).json()).document.author, '作者');
     const manifest = JSON.parse(await readFile(path.join(dataDir, 'typesetting-document.manifest.json'), 'utf8'));
+    assert.notEqual(manifest.current, manifest.recovery);
+    assert.equal(await readFile(path.join(dataDir, 'typesetting-versions', `${manifest.current}.json`), 'utf8'), await readFile(path.join(dataDir, 'typesetting-versions', `${manifest.recovery}.json`), 'utf8'));
     await writeFile(path.join(dataDir, 'typesetting-versions', `${manifest.current}.json`), '{corrupted');
     await server.close();
     server = await serve(createApp({ dataDir, interval: 0 }));
     const restored = await (await fetch(server.base + '/api/typesetting/document')).json();
-    assert.equal(restored.document.body, '较旧的正文');
-    assert.equal(restored.document.revision, 1);
+    assert.equal(restored.document.body, '较新的正文');
+    assert.equal(restored.document.revision, 2);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('首次保存会保留与 current 物理独立的同版本 recovery', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-first-recovery-'));
+  const dataDir = path.join(root, '.data');
+  const store = new TypesettingStore(dataDir);
+  try {
+    const saved = await store.save({ title: '第一篇', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '第一版正文', revision: 1 });
+    const manifest = JSON.parse(await readFile(store.manifest, 'utf8'));
+    assert.notEqual(manifest.current, manifest.recovery);
+    assert.equal(await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'), await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8'));
+    await writeFile(path.join(store.versions, `${manifest.current}.json`), '{corrupted');
+    assert.deepEqual(await new TypesettingStore(dataDir).load(), saved);
+  } finally { await rm(root, { recursive: true, force: true }); }
 });
 
 test('慢的旧预览响应不能覆盖较新的预览', async () => {

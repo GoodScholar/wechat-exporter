@@ -62,13 +62,18 @@ test('导入 API 将普通文章一次性保存为独立元信息和语义 Markd
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
-  for (const phase of ['current-version', 'manifest']) {
+test('任一版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
     const dataDir = path.join(root, '.data');
     let failingPhase = '';
+    let candidateWrites = 0;
     const writeAtomically = async (file, text) => {
-      if (failingPhase === phase && (phase === 'manifest' ? file.endsWith('typesetting-document.manifest.json') : file.includes('typesetting-versions'))) throw new Error('disk denied');
+      if (failingPhase && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if (phase === 'current-version' && candidateWrites === 1 || phase === 'recovery-version' && candidateWrites === 2) throw new Error('disk denied');
+      }
+      if (failingPhase === phase && phase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
       const temporary = `${file}.test`;
       await writeFile(temporary, text, 'utf8');
       await rename(temporary, file);
@@ -78,6 +83,7 @@ test('版本候选或 manifest 提交失败时，旧文稿在内存和重启后�
       await store.save({ title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文', revision: 1 });
       const manifest = await readFile(store.manifest, 'utf8');
       failingPhase = phase;
+      candidateWrites = 0;
       const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
       try {
         const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
@@ -91,12 +97,13 @@ test('版本候选或 manifest 提交失败时，旧文稿在内存和重启后�
   }
 });
 
-test('迁移旧主/备份文稿后，恢复候选写入失败不会暴露候选导入', async () => {
+test('迁移旧主/备份文稿后，任一候选写入失败不会暴露候选导入', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-migration-'));
   const dataDir = path.join(root, '.data');
-  let rejectRecovery = false;
+  let rejectCandidate = false;
+  let candidateWrites = 0;
   const writeAtomically = async (file, text) => {
-    if (rejectRecovery && file.includes('typesetting-versions') && text.includes('旧正文')) throw new Error('recovery denied');
+    if (rejectCandidate && file.includes('typesetting-versions') && ++candidateWrites === 2) throw new Error('recovery denied');
     const temporary = `${file}.test`;
     await writeFile(temporary, text, 'utf8');
     await rename(temporary, file);
@@ -108,7 +115,7 @@ test('迁移旧主/备份文稿后，恢复候选写入失败不会暴露候选�
     await writeFile(store.file, legacy, 'utf8');
     await writeFile(store.backup, legacy, 'utf8');
     assert.equal((await store.load()).body, '旧正文');
-    rejectRecovery = true;
+    rejectCandidate = true;
     const server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle: async () => articleHtml }));
     try {
       const response = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });

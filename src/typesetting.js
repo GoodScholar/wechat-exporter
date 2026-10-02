@@ -40,7 +40,6 @@ export class TypesettingStore {
     this.manifest = path.join(dataDir, 'typesetting-document.manifest.json');
     this.versions = path.join(dataDir, 'typesetting-versions');
     this.document = null;
-    this.versionId = null;
     this.writes = Promise.resolve();
     this.replaceFile = replaceFile;
     this.removeFile = removeFile;
@@ -54,7 +53,6 @@ export class TypesettingStore {
         if (typeof versionId !== 'string') continue;
         try {
           this.document = normalizeDocument(JSON.parse(await readFile(path.join(this.versions, `${versionId}.json`), 'utf8')));
-          this.versionId = versionId;
           return this.document;
         } catch { /* Try the recovery version before legacy files. */ }
       }
@@ -82,16 +80,15 @@ export class TypesettingStore {
       if (next.revision === current.revision) return current;
       next.savedAt = new Date().toISOString();
       const serialized = JSON.stringify(next, null, 2);
-      const versionId = randomUUID();
-      const recoveryId = this.versionId || (current.revision ? randomUUID() : versionId);
+      const currentId = randomUUID();
+      const recoveryId = randomUUID();
       await mkdir(this.versions, { recursive: true });
-      if (!this.versionId && current.revision) await this.replaceFile(path.join(this.versions, `${recoveryId}.json`), JSON.stringify(current, null, 2));
-      await this.replaceFile(path.join(this.versions, `${versionId}.json`), serialized);
-      await this.replaceFile(this.manifest, JSON.stringify({ current: versionId, recovery: recoveryId }, null, 2));
+      await this.replaceFile(path.join(this.versions, `${currentId}.json`), serialized);
+      await this.replaceFile(path.join(this.versions, `${recoveryId}.json`), serialized);
+      await this.replaceFile(this.manifest, JSON.stringify({ current: currentId, recovery: recoveryId }, null, 2));
       this.document = next;
-      this.versionId = versionId;
       try {
-        const keep = new Set([versionId, recoveryId]);
+        const keep = new Set([currentId, recoveryId]);
         for (const name of await readdir(this.versions)) if (name.endsWith('.json') && !keep.has(name.slice(0, -5))) await this.removeFile(path.join(this.versions, name));
       } catch { /* Cleanup is post-commit and never changes the visible manifest. */ }
       return next;
