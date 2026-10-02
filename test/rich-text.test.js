@@ -101,6 +101,14 @@ test('嵌套特殊媒体只输出一个有安全来源的可见占位和降级�
   assert.match(result.markdown, /视频[\s\S]*来源：https:\/\/example\.test\/source\.mp4/);
 });
 
+test('特殊媒体只采用匹配媒体来源并审计被替换节点内的危险内容', () => {
+  const result = convertRichText('<div data-type="video" onclick="evil()"><script src="https://evil.test/payload.js"></script><a href="https://example.test/help">帮助</a><img src="https://example.test/thumbnail.jpg"><video src="https://example.test/movie.mp4"></video><iframe src="javascript:evil()"></iframe></div>');
+  assert.deepEqual(result.downgraded, [{ type: 'video', sourceUrl: 'https://example.test/movie.mp4' }]);
+  assert.deepEqual(result.removed, ['script', 'event-handler', 'unsafe-url']);
+  assert.match(result.markdown, /来源：https:\/\/example\.test\/movie\.mp4/);
+  assert.doesNotMatch(result.markdown, /evil\.test|example\.test\/(?:help|thumbnail)|javascript:/);
+});
+
 test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构且不保存文稿', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
@@ -142,5 +150,19 @@ test('富文本转换 HTTP API 覆盖恶意内容、全部特殊媒体和超限 
     const tooLarge = await post(server.base, '/api/typesetting/rich-text', { html: 'x'.repeat(160 * 1024) });
     assert.equal(tooLarge.status, 413);
     assert.deepEqual(await tooLarge.json(), { error: { code: 'RICH_TEXT_TOO_LARGE', message: '富文本内容过大，无法安全转换。', action: '请缩短粘贴内容后重试。' } });
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本转换 HTTP API 审计特殊媒体内部危险内容且不暴露无关 URL', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-special-media-http-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const response = await post(server.base, '/api/typesetting/rich-text', { html: '<div data-type="video" onclick="evil()"><script src="https://evil.test/payload.js"></script><a href="https://example.test/help">帮助</a><img src="https://example.test/thumbnail.jpg"><video src="https://example.test/movie.mp4"></video><iframe src="javascript:evil()"></iframe></div>' });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.downgraded, [{ type: 'video', sourceUrl: 'https://example.test/movie.mp4' }]);
+    assert.deepEqual(result.removed, ['script', 'event-handler', 'unsafe-url']);
+    assert.match(result.markdown, /来源：https:\/\/example\.test\/movie\.mp4/);
+    assert.doesNotMatch(result.markdown, /evil\.test|example\.test\/(?:help|thumbnail)|javascript:/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

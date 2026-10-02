@@ -49,6 +49,21 @@ export class RichTextError extends Error {
 
 const fail = code => { throw new RichTextError(code); };
 const addOnce = (items, value) => { if (!items.includes(value)) items.push(value); };
+const mediaSourceRules = {
+  video: [
+    { selector: 'video', attributes: ['src', 'data-src', 'data-url', 'url'] },
+    { selector: 'source', attributes: ['src'] },
+    { selector: 'mp-common-videosnap, [data-type="video"]', attributes: ['data-src', 'data-url', 'url'] }
+  ],
+  audio: [
+    { selector: 'audio', attributes: ['src', 'data-src', 'data-url', 'url'] },
+    { selector: 'source', attributes: ['src'] },
+    { selector: 'mpvoice, qqmusic, mp-common-mpaudio, [data-type="audio"]', attributes: ['data-src', 'data-url', 'url'] }
+  ],
+  embed: [{ selector: 'iframe, embed', attributes: ['src'] }, { selector: 'object', attributes: ['data'] }],
+  'mini-program': [{ selector: 'mp-miniprogram, mp-weapp, [data-miniprogram-appid], [data-weapp-appid], [data-miniprogram]', attributes: ['data-url', 'url'] }],
+  poll: [{ selector: 'iframe', attributes: ['src'] }, { selector: 'mp-vote, [data-vote-id], [data-type="vote"], [class~="vote_area"]', attributes: ['data-url', 'url'] }]
+};
 
 function safeUrl(value, { image = false } = {}) {
   try {
@@ -57,9 +72,12 @@ function safeUrl(value, { image = false } = {}) {
   } catch { return ''; }
 }
 
-function sourceUrl($, element) {
+function sourceUrl($, element, type) {
+  const rules = mediaSourceRules[type] || [];
   for (const node of [element, ...element.find('*').toArray().map(item => $(item))]) {
-    for (const attribute of ['src', 'href', 'data', 'data-src', 'data-url', 'url']) {
+    const rule = rules.find(candidate => node.is(candidate.selector));
+    if (!rule) continue;
+    for (const attribute of rule.attributes) {
       const url = safeUrl(node.attr(attribute));
       if (url) return url;
     }
@@ -77,7 +95,7 @@ function replaceSpecialContent($, downgraded) {
     if (!definition) continue;
     if (nested) continue;
     const node = $(element);
-    const source = sourceUrl($, node);
+    const source = sourceUrl($, node, definition.type);
     const text = `[特殊内容：${definition.label}]${source ? ` 来源：${source}` : ''}`;
     const placeholder = $('<blockquote><p></p></blockquote>');
     placeholder.find('p').text(text);
@@ -120,8 +138,8 @@ export function convertRichText(html) {
   const $ = load(html);
   const removed = [];
   const downgraded = [];
-  replaceSpecialContent($, downgraded);
   removeUnsafeContent($, removed);
+  replaceSpecialContent($, downgraded);
   const block = $('body').find('p, div, section, article, main, header, footer, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table, hr').length > 0;
   const safeHtml = sanitizeHtml($('body').html() || '', {
     allowedTags: ['p', 'br', 'div', 'section', 'article', 'main', 'header', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'del', 's', 'a', 'img', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
