@@ -154,13 +154,14 @@ export class TypesettingStore {
   }
 }
 
-export function renderTypesettingMarkdown(body) {
-  if (!body.trim()) return { html: '' };
+export function renderTypesettingMarkdown(body, presentation) {
+  const normalizedPresentation = normalizeTypesettingPresentation(presentation);
+  if (!body.trim()) return { html: '', presentation: normalizedPresentation };
   const html = sanitizeHtml(marked.parse(body, { gfm: true, breaks: true }), {
     allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'h1', 'h2', 'span'],
     allowedAttributes: { a: ['href', 'title'], img: ['src', 'alt', 'width', 'height'], th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'], code: ['class'] },
     allowedSchemes: ['https', 'http', 'mailto'],
     allowProtocolRelative: false
   });
-  return { html };
+  return { html, presentation: normalizedPresentation };
 }

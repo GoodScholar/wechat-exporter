@@ -6,7 +6,7 @@ import path from 'node:path';
 import { chromium } from 'playwright';
 import { createApp } from '../src/server.js';
 import { browserOptions } from '../src/browser.js';
-import { createDefaultThemeSettings, normalizeTypesettingPresentation, TypesettingStore, typesettingThemeNames } from '../src/typesetting.js';
+import { createDefaultThemeSettings, normalizeTypesettingPresentation, renderTypesettingMarkdown, TypesettingStore, typesettingThemeNames } from '../src/typesetting.js';
 
 async function serve(app) {
   const server = app.listen(0, '127.0.0.1');
@@ -29,6 +29,88 @@ const expectedThemeSettings = {
 const documentWithTheme = (overrides = {}) => ({
   title: '主题文稿', author: '作者', account: '公众号', publishedAt: '2026-10-02', body: '正文',
   theme: 'default', themeSettings: createDefaultThemeSettings(), revision: 1, ...overrides
+});
+
+const representativeMarkdown = `# 一级标题
+
+一段含有 *强调* 的文字和[链接](https://example.com)。
+
+- 列表一
+- 列表二
+
+> 引用文字
+
+\`\`\`js
+const answer = 42;
+\`\`\`
+
+![图片](https://example.com/image.png)
+
+---
+
+| 表头 A | 表头 B |
+| --- | --- |
+| 单元格 A | 单元格 B |`;
+
+test('三套主题对代表性 Markdown 生成完全相同的语义 HTML', () => {
+  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown(representativeMarkdown, {
+    theme,
+    settings: expectedThemeSettings[theme]
+  }));
+  assert.ok(renders[0].html.includes('<h1>一级标题</h1>'));
+  assert.ok(renders[0].html.includes('<table>'));
+  assert.deepEqual(renders.map(render => render.html), [renders[0].html, renders[0].html, renders[0].html]);
+  assert.deepEqual(renders.map(render => render.presentation), typesettingThemeNames.map(theme => ({
+    theme,
+    settings: expectedThemeSettings[theme]
+  })));
+});
+
+test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-presentation-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const settings = { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' };
+    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings });
+    assert.equal(accepted.status, 200);
+    const payload = await accepted.json();
+    assert.deepEqual(payload.presentation, { theme: 'grace', settings });
+    assert.deepEqual(Object.keys(payload).sort(), ['html', 'presentation']);
+
+    const invalidPresentations = [
+      { body: representativeMarkdown, theme: 'unknown', settings },
+      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' } },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' } }
+    ];
+    for (const body of invalidPresentations) assert.equal((await post(server.base, '/api/typesetting/render', body)).status, 400);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('三套主题样式全部作用域化且不加载外部资源', async () => {
+  const css = await readFile(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
+  for (const theme of typesettingThemeNames) {
+    assert.match(css, new RegExp(`\\.typeset-preview\\.typeset-theme-${theme}`));
+    assert.match(css, new RegExp(`\\.typeset-preview\\.typeset-theme-${theme} h[1-3]`));
+  }
+  for (const variable of ['--md-primary-color', '--md-font-size', '--md-line-height', '--md-block-spacing']) assert.match(css, new RegExp(variable));
+  assert.doesNotMatch(css, /@import|@font-face|<script|https?:\/\/|url\(/i);
+  assert.doesNotMatch(css, /(^|,|})\s*(?:h[1-6]|p|blockquote|ul|ol|li|pre|code|img|a|hr|table|th|td)\b/m);
+});
+
+test('第三方说明记录三套主题、设置来源、固定提交和许可证', async () => {
+  const notices = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
+  for (const source of [
+    'packages/shared/src/configs/theme-css/default.css',
+    'packages/shared/src/configs/theme-css/grace.css',
+    'packages/shared/src/configs/theme-css/simple.css',
+    'packages/shared/src/configs/style.ts',
+    'apps/web/src/stores/theme.ts',
+    'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
+    'WTFPL v2'
+  ]) assert.match(notices, new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
+  assert.match(notices, /主色|字号|行距|段间距/);
 });
 
 test('浏览器原生撤销快捷键按宿主平台映射', () => {
