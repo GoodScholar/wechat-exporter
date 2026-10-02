@@ -16,6 +16,8 @@ async function post(base, route, body) {
   return await fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
 }
 
+const unsafeSpecialMediaHtml = '<object data="javascript:evil()"></object><video data-src="file:///etc/passwd" data-url="data:text/html,evil" url="javascript:evil()" poster="data:image/png;base64,abc"></video><audio data-src="javascript:evil()" data-url="file:///etc/passwd" url="data:text/html,evil" poster="javascript:evil()"></audio><div class="vote_area" data-url="data:text/html,evil" url="file:///etc/passwd" poster="javascript:evil()"></div><mp-miniprogram data-url="javascript:evil()" url="data:text/html,evil" poster="file:///etc/passwd"></mp-miniprogram>';
+
 test('富文本转换保留语义 Markdown 且不会凭空加入文章元信息', () => {
   const result = convertRichText('<html><head><title>不应成为正文</title><style>p{color:red}</style></head><body><h1>标题</h1><p><strong>重点</strong>和<em>强调</em>，<a href="https://example.test/read">链接</a>。</p><ol><li>一</li></ol><ul><li>二</li></ul><blockquote>引用</blockquote><table><thead><tr><th>列</th></tr></thead><tbody><tr><td>值</td></tr></tbody></table><p><code>inline()</code></p><pre><code>const value = 1;</code></pre><img src="https://example.test/image.png" alt="配图"></body></html>');
   assert.match(result.markdown, /^# 标题/m);
@@ -109,6 +111,23 @@ test('特殊媒体只采用匹配媒体来源并审计被替换节点内的危�
   assert.doesNotMatch(result.markdown, /evil\.test|example\.test\/(?:help|thumbnail)|javascript:/);
 });
 
+test('视频和音频只采用同类型父节点下的 source', () => {
+  const result = convertRichText('<div data-type="video"><audio><source src="https://example.test/audio-first.mp3"></audio><video><source src="https://example.test/movie-fallback.mp4"></video></div><div data-type="audio"><video><source src="https://example.test/movie-first.mp4"></video><audio><source src="https://example.test/audio-fallback.mp3"></audio></div>');
+  assert.deepEqual(result.downgraded, [
+    { type: 'video', sourceUrl: 'https://example.test/movie-fallback.mp4' },
+    { type: 'audio', sourceUrl: 'https://example.test/audio-fallback.mp3' }
+  ]);
+  assert.doesNotMatch(result.markdown, /audio-first|movie-first/);
+});
+
+test('特殊媒体候选 URL 属性中的危险值会被审计且不泄露', () => {
+  const result = convertRichText(unsafeSpecialMediaHtml);
+  assert.deepEqual(result.downgraded.map(item => item.type), ['embed', 'video', 'audio', 'poll', 'mini-program']);
+  assert.equal(result.downgraded.some(item => item.sourceUrl), false);
+  assert.deepEqual(result.removed, ['unsafe-url']);
+  assert.doesNotMatch(result.markdown, /javascript:|data:|file:/i);
+});
+
 test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构且不保存文稿', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
@@ -164,5 +183,19 @@ test('富文本转换 HTTP API 审计特殊媒体内部危险内容且不暴露�
     assert.deepEqual(result.removed, ['script', 'event-handler', 'unsafe-url']);
     assert.match(result.markdown, /来源：https:\/\/example\.test\/movie\.mp4/);
     assert.doesNotMatch(result.markdown, /evil\.test|example\.test\/(?:help|thumbnail)|javascript:/);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('富文本转换 HTTP API 审计特殊媒体的全部候选 URL 属性', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-text-special-url-http-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  try {
+    const response = await post(server.base, '/api/typesetting/rich-text', { html: unsafeSpecialMediaHtml });
+    assert.equal(response.status, 200);
+    const result = await response.json();
+    assert.deepEqual(result.downgraded.map(item => item.type), ['embed', 'video', 'audio', 'poll', 'mini-program']);
+    assert.equal(result.downgraded.some(item => item.sourceUrl), false);
+    assert.deepEqual(result.removed, ['unsafe-url']);
+    assert.doesNotMatch(result.markdown, /javascript:|data:|file:/i);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

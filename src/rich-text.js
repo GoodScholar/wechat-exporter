@@ -52,12 +52,12 @@ const addOnce = (items, value) => { if (!items.includes(value)) items.push(value
 const mediaSourceRules = {
   video: [
     { selector: 'video', attributes: ['src', 'data-src', 'data-url', 'url'] },
-    { selector: 'source', attributes: ['src'] },
+    { selector: 'source', parent: 'video', attributes: ['src'] },
     { selector: 'mp-common-videosnap, [data-type="video"]', attributes: ['data-src', 'data-url', 'url'] }
   ],
   audio: [
     { selector: 'audio', attributes: ['src', 'data-src', 'data-url', 'url'] },
-    { selector: 'source', attributes: ['src'] },
+    { selector: 'source', parent: 'audio', attributes: ['src'] },
     { selector: 'mpvoice, qqmusic, mp-common-mpaudio, [data-type="audio"]', attributes: ['data-src', 'data-url', 'url'] }
   ],
   embed: [{ selector: 'iframe, embed', attributes: ['src'] }, { selector: 'object', attributes: ['data'] }],
@@ -76,13 +76,19 @@ function sourceUrl($, element, type) {
   const rules = mediaSourceRules[type] || [];
   for (const node of [element, ...element.find('*').toArray().map(item => $(item))]) {
     const rule = rules.find(candidate => node.is(candidate.selector));
-    if (!rule) continue;
+    if (!rule || rule.parent && !node.parents('video, audio').first().is(rule.parent)) continue;
     for (const attribute of rule.attributes) {
       const url = safeUrl(node.attr(attribute));
       if (url) return url;
     }
   }
   return undefined;
+}
+
+function candidateUrlAttributes(node) {
+  const names = new Set(['href', 'src', 'action', 'poster']);
+  for (const rules of Object.values(mediaSourceRules)) for (const rule of rules) if (node.is(rule.selector)) for (const name of rule.attributes) names.add(name);
+  return names;
 }
 
 function replaceSpecialContent($, downgraded) {
@@ -117,9 +123,9 @@ function removeUnsafeContent($, removed) {
       addOnce(removed, 'event-handler');
     }
   });
-  $('[href], [src], [action]').each((_, element) => {
+  $('*').each((_, element) => {
     const node = $(element);
-    for (const name of ['href', 'src', 'action']) {
+    for (const name of candidateUrlAttributes(node)) {
       const value = node.attr(name);
       if (value === undefined) continue;
       const safe = safeUrl(value, { image: node.is('img') && name === 'src' });
