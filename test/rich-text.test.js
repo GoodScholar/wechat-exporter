@@ -142,7 +142,11 @@ test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构�
     assert.deepEqual(await failed.json(), { error: { code: 'EMPTY_RICH_TEXT', message: '富文本中没有可转换的可读内容。', action: '请保留正文文字后重试。' } });
     assert.deepEqual(await (await fetch(server.base + '/api/typesetting/document')).json(), before);
     const escaped = await (await post(server.base, '/api/typesetting/rich-text', { html: '<p>&lt;img src="https://tracker.invalid/pixel"&gt;</p>' })).json();
-    const preview = await (await post(server.base, '/api/typesetting/render', { body: escaped.markdown })).json();
+    const preview = await (await post(server.base, '/api/typesetting/render', {
+      body: escaped.markdown,
+      theme: 'default',
+      settings: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }
+    })).json();
     assert.doesNotMatch(preview.html, /<img\b/i);
     assert.match(preview.html, /&lt;img/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }

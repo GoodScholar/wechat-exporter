@@ -1,9 +1,11 @@
 const $ = selector => document.querySelector(selector);
 const fields = { title: $('#document-title'), author: $('#document-author'), account: $('#document-account'), publishedAt: $('#document-published-at'), body: $('#document-body') };
+const themeControls = { theme: $('#document-theme'), primaryColor: $('#theme-primary-color'), fontSize: $('#theme-font-size'), lineHeight: $('#theme-line-height'), blockSpacing: $('#theme-block-spacing'), reset: $('#reset-theme') };
 const importForm = $('#article-import');
 const importUrl = $('#import-url');
 const importMessage = $('#import-message');
-let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '' };
+const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
+let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings() };
 let saveTimer;
 let previewTimer;
 let saving = false;
@@ -18,6 +20,23 @@ let activeRichPaste;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
+function currentThemeSettings() { return documentModel.themeSettings[documentModel.theme]; }
+function syncThemeControls() {
+  themeControls.theme.value = documentModel.theme;
+  for (const name of ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']) themeControls[name].value = currentThemeSettings()[name];
+}
+function applyPresentation(presentation) {
+  const preview = $('#preview');
+  preview.classList.remove(...[...preview.classList].filter(name => name.startsWith('typeset-theme-')));
+  preview.classList.add(`typeset-theme-${presentation.theme}`);
+  preview.style.setProperty('--md-primary-color', presentation.settings.primaryColor);
+  preview.style.setProperty('--md-font-size', presentation.settings.fontSize);
+  preview.style.setProperty('--md-line-height', presentation.settings.lineHeight);
+  preview.style.setProperty('--md-block-spacing', presentation.settings.blockSpacing);
+}
+function hydrateDocument(document) {
+  documentModel = { ...documentModel, ...document, theme: document.theme || 'default', themeSettings: document.themeSettings || defaultThemeSettings() };
+}
 function hasContent() { return Object.values(fields).some(input => input.value.trim()); }
 function showImportMessage(error) {
   const details = typeof error === 'string' ? { message: error } : error || {};
@@ -31,10 +50,13 @@ function showImportMessage(error) {
   }
 }
 async function preview(version) {
-  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body }) });
+  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() } }) });
   if (!response.ok) return;
   const rendered = await response.json();
-  if (version === previewVersion) $('#preview').innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
+  if (version === previewVersion) {
+    $('#preview').innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
+    applyPresentation(rendered.presentation);
+  }
 }
 function schedulePreview() { const version = ++previewVersion; clearTimeout(previewTimer); previewTimer = setTimeout(() => { void preview(version); }, 180); }
 async function save() {
@@ -73,6 +95,20 @@ async function flushSave() {
   return true;
 }
 for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+themeControls.theme.addEventListener('change', () => {
+  documentModel.theme = themeControls.theme.value;
+  syncThemeControls();
+  saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
+for (const name of ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']) themeControls[name].addEventListener('change', () => {
+  currentThemeSettings()[name] = themeControls[name].value;
+  saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
+themeControls.reset.addEventListener('click', () => {
+  documentModel.themeSettings[documentModel.theme] = defaultThemeSettings()[documentModel.theme];
+  syncThemeControls();
+  saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
 function showRichTextMessage(message = '') { $('#rich-text-message').textContent = message; }
 function richTextError(error) {
   const details = error || {};
@@ -142,6 +178,7 @@ importForm.addEventListener('submit', async event => {
   const button = importForm.querySelector('button');
   button.disabled = true;
   for (const input of Object.values(fields)) input.disabled = true;
+  for (const control of Object.values(themeControls)) control.disabled = true;
   try {
     if (!await flushSave()) throw { message: '当前编辑未能保存，未开始导入。', action: '检查数据目录后继续编辑或重试保存。' };
     importMessage.textContent = '正在读取文章…';
@@ -150,13 +187,14 @@ importForm.addEventListener('submit', async event => {
     if (!response.ok) throw result.error || { message: '导入失败，请重试。' };
     clearTimeout(saveTimer);
     dirty = false;
-    documentModel = result.document;
+    hydrateDocument(result.document);
     for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
+    syncThemeControls();
     schedulePreview();
     setStatus('已保存');
     importMessage.textContent = '文章已导入，可继续编辑。';
   } catch (error) { showImportMessage(error); }
-  finally { button.disabled = false; for (const input of Object.values(fields)) input.disabled = false; }
+  finally { button.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
 });
-async function start() { const response = await fetch('/api/typesetting/document'); if (response.ok) documentModel = (await response.json()).document; for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || ''; void preview(++previewVersion); }
+async function start() { const response = await fetch('/api/typesetting/document'); if (response.ok) hydrateDocument((await response.json()).document); for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || ''; syncThemeControls(); void preview(++previewVersion); }
 void start();
