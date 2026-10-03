@@ -30,6 +30,8 @@ let renderBlocked = false;
 let staticDiagnostics = [];
 let dynamicImageDiagnostics = [];
 let dynamicImageDiagnosticSequence = 0;
+let richTextAudit;
+let richTextAuditSequence = 0;
 const pendingImageHandlers = new WeakMap();
 let richPastePending = false;
 let richPasteVersion = 0;
@@ -125,6 +127,29 @@ function isValidRenderResult(value, body, detachedPreview) {
   if (new Set(value.diagnostics.map(item => item.id)).size !== value.diagnostics.length) return false;
   return value.blocked === value.diagnostics.some(item => item.severity === 'blocker');
 }
+function isSafeHttpUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch { return false; }
+}
+function isValidStructuredDowngrade(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (specialContentTypes.includes(value.type)) {
+    return (hasExactKeys(value, ['type']) || hasExactKeys(value, ['type', 'sourceUrl']) && isSafeHttpUrl(value.sourceUrl));
+  }
+  return hasExactKeys(value, ['type', 'reason']) && value.type === 'image'
+    && ['local-binary', 'local-path', 'unsupported-scheme', 'missing-source'].includes(value.reason);
+}
+function isValidRichTextResult(value) {
+  return hasExactKeys(value, ['markdown', 'removed', 'downgraded', 'block'])
+    && typeof value.markdown === 'string' && Array.isArray(value.removed)
+    && new Set(value.removed).size === value.removed.length
+    && value.removed.every(type => safeRemovedTypes.includes(type))
+    && Array.isArray(value.downgraded) && value.downgraded.every(isValidStructuredDowngrade)
+    && typeof value.block === 'boolean';
+}
 function syncThemeControls() {
   themeControls.theme.value = documentModel.theme;
   for (const name of themeSettingNames) themeControls[name].value = currentThemeSettings()[name];
@@ -137,9 +162,16 @@ function applyPresentation(preview, presentation) {
   preview.style.setProperty('--md-line-height', presentation.settings.lineHeight);
   preview.style.setProperty('--md-block-spacing', presentation.settings.blockSpacing);
 }
-function hydrateDocument(document) {
+function hydrateDocument(document, applyFields = false) {
   if (!isCompleteDocument(document)) return false;
+  const bodyChanged = applyFields && fields.body.value !== document.body;
   documentModel = document;
+  if (applyFields) {
+    for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
+    convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
+    syncThemeControls();
+  }
+  if (bodyChanged) clearRichTextAudit();
   return true;
 }
 function hasContent() { return Object.values(fields).some(input => input.value.trim()); }
@@ -198,7 +230,11 @@ function focusDiagnostic(diagnostic, version) {
   setTimeout(() => node.classList.remove('format-target-highlight'), 1600);
 }
 function renderDiagnosticGroups(version) {
-  const allDiagnostics = [...staticDiagnostics, ...dynamicImageDiagnostics];
+  if (richTextAudit) {
+    const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics].map(item => item.id));
+    if (used.has(richTextAudit.id)) richTextAudit = { ...richTextAudit, id: nextRichTextAuditId() };
+  }
+  const allDiagnostics = [...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])];
   for (const severity of severityNames) {
     const group = formatChecks.querySelector(`[data-check-severity="${severity}"]`);
     const diagnostics = allDiagnostics.filter(item => item.severity === severity);
@@ -216,6 +252,7 @@ function renderDiagnosticGroups(version) {
         button.type = 'button';
         button.className = 'format-check-item';
         button.dataset.diagnosticId = diagnostic.id;
+        if (diagnostic.code === 'UNSAFE_RICH_TEXT_REMOVED') button.dataset.diagnosticTypes = diagnostic.meta.types.join(',');
         button.textContent = diagnostic.message;
         button.addEventListener('click', () => focusDiagnostic(diagnostic, version));
         fragment.append(button);
@@ -242,11 +279,35 @@ function isCurrentPendingImage(img, previewRoot, version) {
   return matches.length === 1 && matches[0] === img;
 }
 function nextDynamicImageDiagnosticId(version) {
-  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics].map(item => item.id));
+  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])].map(item => item.id));
   let id;
   do id = `runtime-image-load-failed-${version}-${++dynamicImageDiagnosticSequence}`;
   while (used.has(id));
   return id;
+}
+function nextRichTextAuditId() {
+  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])].map(item => item.id));
+  let id;
+  do id = `rich-text-removal-${++richTextAuditSequence}`;
+  while (used.has(id));
+  return id;
+}
+function clearRichTextAudit() {
+  if (!richTextAudit) return;
+  richTextAudit = undefined;
+  renderDiagnosticGroups(appliedRenderVersion);
+}
+function replaceRichTextAudit(removed, start, insertedText) {
+  richTextAudit = undefined;
+  if (removed.length > 0) richTextAudit = {
+    id: nextRichTextAuditId(),
+    code: 'UNSAFE_RICH_TEXT_REMOVED',
+    severity: 'conversion',
+    message: '富文本粘贴时已移除不安全内容。',
+    targets: [{ kind: 'source', start, end: start + insertedText.length }],
+    meta: { types: safeRemovedTypes.filter(type => removed.includes(type)) }
+  };
+  renderDiagnosticGroups(appliedRenderVersion);
 }
 function normalizeRuntimeImageAlt(value) {
   return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
@@ -373,7 +434,10 @@ async function flushSave() {
   }
   return true;
 }
-for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
+  if (name === 'body') clearRichTextAudit();
+  saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
 convertExternalLinks.addEventListener('change', () => {
   documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
@@ -405,6 +469,11 @@ function preserveBlockBoundaries(markdown, snapshot, block) {
   const afterNewlines = after.match(/^\n*/)[0].length;
   return `${before ? '\n'.repeat(Math.max(0, 2 - beforeNewlines)) : ''}${markdown}${after ? '\n'.repeat(Math.max(0, 2 - afterNewlines)) : ''}`;
 }
+function insertTextAtSelection(text, start, end) {
+  fields.body.focus();
+  fields.body.setSelectionRange(start, end);
+  return document.execCommand('insertText', false, text);
+}
 function noteSelectionChange() {
   if (activeRichPaste && (fields.body.selectionStart !== activeRichPaste.start || fields.body.selectionEnd !== activeRichPaste.end)) activeRichPaste.selectionChanged = true;
 }
@@ -428,6 +497,19 @@ for (const property of ['selectionStart', 'selectionEnd']) {
 fields.body.addEventListener('select', noteSelectionChange);
 document.addEventListener('selectionchange', noteSelectionChange);
 fields.body.addEventListener('paste', async event => {
+  const imageFile = [...(event.clipboardData?.files || [])].find(file => typeof file.type === 'string' && file.type.toLowerCase().startsWith('image/'));
+  if (imageFile) {
+    event.preventDefault();
+    const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd };
+    const placeholder = '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。';
+    const markdown = preserveBlockBoundaries(placeholder, snapshot, true);
+    if (!insertTextAtSelection(markdown, snapshot.start, snapshot.end)) {
+      showRichTextMessage('浏览器无法安全插入图片占位。请手动输入图片占位。');
+      return;
+    }
+    showRichTextMessage('已插入本地图片占位，请上传图片后替换为 HTTPS 地址。');
+    return;
+  }
   const html = event.clipboardData?.getData('text/html')?.trim();
   if (!html) return;
   event.preventDefault();
@@ -440,15 +522,15 @@ fields.body.addEventListener('paste', async event => {
   try {
     const response = await fetch('/api/typesetting/rich-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html }) });
     const result = await response.json();
-    if (!response.ok) throw result.error;
     if (snapshot.request !== richPasteVersion || snapshot.selectionChanged || changeVersion !== snapshot.changeVersion || fields.body.value !== snapshot.body || fields.body.selectionStart !== snapshot.start || fields.body.selectionEnd !== snapshot.end) {
       showRichTextMessage('正文或选区已变化，请重新粘贴后重试。');
       return;
     }
+    if (!response.ok) throw result.error;
+    if (!isValidRichTextResult(result)) throw { message: '富文本转换失败，请重试。', action: '服务返回了不完整的转换结果。' };
     const markdown = preserveBlockBoundaries(result.markdown, snapshot, result.block);
-    fields.body.focus();
-    fields.body.setSelectionRange(snapshot.start, snapshot.end);
-    if (!document.execCommand('insertText', false, markdown)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
+    if (!insertTextAtSelection(markdown, snapshot.start, snapshot.end)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
+    replaceRichTextAudit(result.removed, snapshot.start, markdown);
     showRichTextMessage(`已转换富文本${result.removed.length ? `，移除 ${result.removed.length} 项` : ''}${result.downgraded.length ? `，降级 ${result.downgraded.length} 项特殊内容` : ''}。`);
   } catch (error) { showRichTextMessage(richTextError(error)); }
   finally { if (activeRichPaste === snapshot) activeRichPaste = undefined; richPastePending = false; }
@@ -471,10 +553,7 @@ importForm.addEventListener('submit', async event => {
     if (!response.ok) throw result.error || { message: '导入失败，请重试。' };
     clearTimeout(saveTimer);
     dirty = false;
-    if (!hydrateDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
-    for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
-    convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
-    syncThemeControls();
+    if (!hydrateDocument(result.document, true)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
     schedulePreview();
     setStatus('已保存');
     importMessage.textContent = '文章已导入，可继续编辑。';
@@ -484,11 +563,9 @@ importForm.addEventListener('submit', async event => {
 async function start() {
   try {
     const response = await fetch('/api/typesetting/document');
-    if (response.ok) hydrateDocument((await response.json()).document);
+    if (response.ok) hydrateDocument((await response.json()).document, true);
   } catch { /* Keep the complete default document and continue with an initial render. */ }
-  for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
-  convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
-  syncThemeControls();
+  hydrateDocument(documentModel, true);
   markRenderChecking();
   const version = ++previewVersion;
   void preview(version, renderSnapshot());

@@ -840,6 +840,18 @@ async function dispatchPaste(page, { html = '', text = '' }) {
   }, { html, text });
 }
 
+async function dispatchImagePaste(page, { name = 'paste.png', type = 'image/png', html = '' } = {}) {
+  return page.evaluate(({ name, type, html }) => {
+    const clipboard = new DataTransfer();
+    clipboard.items.add(new File(['not-read-by-the-app'], name, { type }));
+    if (html) clipboard.setData('text/html', html);
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard });
+    const body = document.querySelector('#document-body');
+    body.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, value: body.value };
+  }, { name, type, html });
+}
+
 test('纯文本粘贴保持原生路径；富文本确认后按触发选区插入并自动保存', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-ui-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
@@ -1075,5 +1087,36 @@ test('富文本插入进入原生撤销栈，转义标签不触发外部资源�
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
     await page.keyboard.press(historyShortcut(process.platform, true));
     assert.match(await page.getByLabel('Markdown 正文').inputValue(), /tracker\.invalid/);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('剪贴板 image File 插入 local-binary 规范占位支持原生撤销且不创建 blob URL', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-image-file-paste-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      window.__createObjectUrlCalls = 0;
+      const original = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = value => { window.__createObjectUrlCalls++; return original(value); };
+    });
+    let conversionRequests = 0;
+    await page.route('**/api/typesetting/rich-text', route => { conversionRequests++; return route.abort(); });
+    await page.goto(server.base + '/typesetting');
+    await page.getByLabel('Markdown 正文').fill('甲乙');
+    await page.getByLabel('Markdown 正文').evaluate(input => input.setSelectionRange(1, 1));
+    const result = await dispatchImagePaste(page, { name: '危险*[文件].png', html: '<strong>不得走富文本</strong>' });
+    assert.equal(result.defaultPrevented, true);
+    const canonical = '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。';
+    await page.waitForFunction(expected => document.querySelector('#document-body').value === expected, `甲\n\n${canonical}\n\n乙`);
+    assert.equal(await page.evaluate(() => window.__createObjectUrlCalls), 0);
+    assert.equal(conversionRequests, 0);
+    assert.doesNotMatch(await page.getByLabel('Markdown 正文').inputValue(), /危险|data:|blob:/);
+    await page.getByLabel('Markdown 正文').focus();
+    await page.keyboard.press(historyShortcut(process.platform));
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙');
+    await page.keyboard.press(historyShortcut(process.platform, true));
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), `甲\n\n${canonical}\n\n乙`);
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });

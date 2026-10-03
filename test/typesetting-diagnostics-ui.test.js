@@ -107,6 +107,26 @@ async function waitForRenderState(page, state) {
   await page.waitForFunction(expected => document.querySelector('#render-status')?.dataset.state === expected, state);
 }
 
+async function dispatchHtmlPaste(page, html) {
+  return page.evaluate(value => {
+    const clipboard = new DataTransfer();
+    clipboard.setData('text/html', value);
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard });
+    document.querySelector('#document-body').dispatchEvent(event);
+    return event.defaultPrevented;
+  }, html);
+}
+
+function richResult(overrides = {}) {
+  return {
+    markdown: '插入😀内容',
+    removed: ['unsafe-url', 'script', 'style'],
+    downgraded: [{ type: 'video', sourceUrl: 'https://example.test/video' }],
+    block: true,
+    ...overrides
+  };
+}
+
 test('格式检查始终显示三组数量空状态并支持 source 与 preview 键盘定位', async t => {
   const { page, base } = await withBrowser(t);
   await installRenderFixture(page, request => request.body === 'A😀B' ? groupedResult(request.body) : emptyResult(request.body));
@@ -683,4 +703,149 @@ test('格式检查与定位在键盘 reduced-motion 和 390px 窄屏下可操作
   await page.getByText('固定失败', { exact: false }).waitFor();
   assert.equal(await toggle.isDisabled(), false);
   assert.equal(await toggle.isChecked(), true);
+});
+
+test('富文本 removed 合并为单条 conversion 并定位实际插入 UTF-16 范围', async t => {
+  const { page, base } = await withBrowser(t);
+  await page.route('https://fixture.invalid/audit.png', route => route.fulfill({ status: 404, contentType: 'image/png', body: '' }));
+  await installRenderFixture(page, request => request.body ? {
+    html: '<figure role="note" tabindex="0" data-format-target="static-special"><figcaption>特殊内容</figcaption></figure><img src="https://fixture.invalid/audit.png" alt="审计图" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-image">',
+    presentation: { theme: request.theme, settings: request.settings },
+    diagnostics: [{ id: 'static-conversion', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '特殊内容已转为占位。', targets: [{ kind: 'preview', id: 'static-special' }], meta: { type: 'video' } }],
+    blocked: false
+  } : emptyResult(''));
+  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(richResult()) }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('甲乙');
+  await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 1); });
+
+  assert.equal(await dispatchHtmlPaste(page, '<script>危险</script><p>插入😀内容</p>'), true);
+  const inserted = '\n\n插入😀内容\n\n';
+  await page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]').waitFor();
+  await page.locator('#preview [data-image-state="load-failed"]').waitFor();
+  assert.deepEqual(await page.locator('[data-check-severity]').evaluateAll(groups => groups.map(group => [group.dataset.checkSeverity, group.querySelector('[data-check-count]').textContent])), [
+    ['blocker', '0'], ['conversion', '2'], ['advisory', '1']
+  ]);
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+  const ids = await page.locator('.format-check-item').evaluateAll(items => items.map(item => item.dataset.diagnosticId));
+  assert.equal(new Set(ids).size, ids.length);
+  const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  assert.equal(await audit.getAttribute('data-diagnostic-types'), 'script,style,unsafe-url');
+  await audit.click();
+  assert.deepEqual(await page.getByLabel('Markdown 正文').evaluate(input => [input.selectionStart, input.selectionEnd]), [1, 1 + inserted.length]);
+});
+
+test('富文本审计仅在人工或成功正文替换时清除且非正文变化继续保留', async t => {
+  const { page, base } = await withBrowser(t);
+  await installRenderFixture(page, request => ({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }));
+  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(richResult({ block: false })) }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('正文');
+  await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(2, 2); });
+  await dispatchHtmlPaste(page, '<p>审计</p>');
+  const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await audit.waitFor();
+
+  await page.getByLabel('外链转脚注').check();
+  await waitForRenderState(page, 'current');
+  await page.getByLabel('主题').selectOption('grace');
+  await waitForRenderState(page, 'current');
+  await page.getByLabel('标题').fill('只改元信息');
+  await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+  assert.equal(await audit.count(), 1, '脚注、主题、元信息与 body 相同的保存水合必须保留审计');
+
+  await page.getByLabel('Markdown 正文').pressSequentially('x');
+  assert.equal(await audit.count(), 0, '人工正文 input 必须立即清除审计');
+  await page.reload();
+  assert.equal(await page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]').count(), 0, '审计不得持久化');
+});
+
+test('成功下一次粘贴替换旧审计而失败过期选区正文竞态保持当前审计', async t => {
+  const { page, base } = await withBrowser(t);
+  await installRenderFixture(page, request => ({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }));
+  let response = richResult({ markdown: '第一段', removed: ['script'], downgraded: [], block: false });
+  let release;
+  await page.route('**/api/typesetting/rich-text', async route => {
+    if (response === 'held') {
+      await new Promise(resolve => { release = resolve; });
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(richResult({ markdown: '过期', removed: ['style'], downgraded: [], block: false })) });
+    }
+    if (response === 'failure') return route.fulfill({ status: 422, contentType: 'application/json', body: JSON.stringify({ error: { message: '固定失败' } }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(response) });
+  });
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('甲乙');
+  await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 1); });
+  await dispatchHtmlPaste(page, '<p>第一段</p>');
+  let audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await audit.waitFor();
+  const firstId = await audit.getAttribute('data-diagnostic-id');
+
+  response = 'failure';
+  await dispatchHtmlPaste(page, '<p>失败</p>');
+  await page.getByText('固定失败', { exact: false }).waitFor();
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), firstId);
+
+  const beforeFailedInsertion = await page.getByLabel('Markdown 正文').inputValue();
+  await page.evaluate(() => { window.__nativeExecCommand = document.execCommand; document.execCommand = () => false; });
+  response = richResult({ markdown: '不能插入', removed: ['style'], downgraded: [], block: false });
+  await dispatchHtmlPaste(page, '<p>不能插入</p>');
+  await page.getByText('浏览器无法安全插入', { exact: false }).waitFor();
+  assert.equal(await page.getByLabel('Markdown 正文').inputValue(), beforeFailedInsertion);
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), firstId);
+  await page.evaluate(() => { document.execCommand = window.__nativeExecCommand; });
+
+  response = 'held';
+  await dispatchHtmlPaste(page, '<p>过期</p>');
+  await page.waitForTimeout(30);
+  await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(0, 0));
+  release();
+  await page.getByText('正文或选区已变化', { exact: false }).waitFor();
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), firstId);
+
+  response = richResult({ markdown: '第二段', removed: ['unsafe-url', 'style'], downgraded: [], block: false });
+  await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 1));
+  await dispatchHtmlPaste(page, '<p>第二段</p>');
+  audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await page.waitForFunction(id => document.querySelector('.format-check-item[data-diagnostic-id^="rich-text-removal-"]')?.dataset.diagnosticId !== id, firstId);
+  assert.equal(await audit.getAttribute('data-diagnostic-types'), 'style,unsafe-url');
+});
+
+test('客户端拒绝额外键重复 removed 未知 downgrade 和不安全 sourceUrl', async t => {
+  const { page, base } = await withBrowser(t);
+  await installRenderFixture(page, request => ({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }));
+  let payload = richResult({ markdown: '基准', removed: ['script'], downgraded: [], block: false });
+  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('甲乙');
+  await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 1); });
+  await dispatchHtmlPaste(page, '<p>基准</p>');
+  const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await audit.waitFor();
+  await waitForRenderState(page, 'current');
+
+  const invalid = [
+    { ...richResult(), extra: true },
+    richResult({ markdown: null }),
+    richResult({ block: 1 }),
+    richResult({ removed: 'script' }),
+    richResult({ downgraded: {} }),
+    richResult({ removed: ['script', 'script'] }),
+    richResult({ removed: ['unknown'] }),
+    richResult({ downgraded: [{ type: 'carousel' }] }),
+    richResult({ downgraded: [{ type: 'video', sourceUrl: 'https://user:secret@example.test/a' }] }),
+    richResult({ downgraded: [{ type: 'image', reason: 'local-binary', sourceUrl: 'https://example.test/a' }] }),
+    richResult({ downgraded: [{ type: 'image', reason: 'unknown' }] }),
+    richResult({ downgraded: [{ type: 'video', extra: true }] })
+  ];
+  for (const candidate of invalid) {
+    payload = candidate;
+    const before = await page.getByLabel('Markdown 正文').inputValue();
+    const beforeChecks = await page.locator('#format-checks').innerHTML();
+    await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 1));
+    await dispatchHtmlPaste(page, '<p>畸形</p>');
+    await page.getByText('富文本转换失败', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), before);
+    assert.equal(await page.locator('#format-checks').innerHTML(), beforeChecks);
+  }
 });
