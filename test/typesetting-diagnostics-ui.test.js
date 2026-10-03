@@ -414,7 +414,7 @@ test('客户端接受真实 renderer 的标题表格代码链接脚注特殊内�
   assert.equal(await page.locator('#preview a:not([href])').count(), 1);
 });
 
-test('客户端接受真实 renderer 保留含控制字符的安全链接', async t => {
+test('客户端接受真实 renderer 保留的安全协议链接', async t => {
   const { page, base } = await withBrowser(t);
   await page.goto(base() + '/typesetting');
   await page.getByLabel('外链转脚注').uncheck();
@@ -422,7 +422,10 @@ test('客户端接受真实 renderer 保留含控制字符的安全链接', asyn
     '<a href="https://example.test/a\tb">安全 absolute</a>',
     '<a href="/safe\tpath">安全 relative</a>',
     '<a href="#sec\ttion">安全 fragment</a>',
-    '<a href="mailto:reader\t@example.test">安全 mailto</a>'
+    '<a href="mailto:reader\t@example.test">安全 mailto</a>',
+    '<a href="http://">空 host</a>',
+    '<a href="http://[">不完整 host</a>',
+    '<a href="http://x:99999">非法端口</a>'
   ].join(' '));
   await waitForRenderState(page, 'current');
 
@@ -434,7 +437,10 @@ test('客户端接受真实 renderer 保留含控制字符的安全链接', asyn
     { text: '安全 absolute', href: 'https://example.test/a\tb' },
     { text: '安全 relative', href: '/safe\tpath' },
     { text: '安全 fragment', href: '#sec\ttion' },
-    { text: '安全 mailto', href: 'mailto:reader\t@example.test' }
+    { text: '安全 mailto', href: 'mailto:reader\t@example.test' },
+    { text: '空 host', href: 'http://' },
+    { text: '不完整 host', href: 'http://[' },
+    { text: '非法端口', href: 'http://x:99999' }
   ]);
 });
 

@@ -108,9 +108,9 @@ function hasAllowedPreviewElement(element) {
   if (tag === 'a' && element.hasAttribute('href')) {
     const href = hrefForProtocolClassification(element.getAttribute('href'));
     if (/^[\\/]{2}/u.test(href)) return false;
-    try {
-      if (!['http:', 'https:', 'mailto:'].includes(new URL(href, window.location.href).protocol)) return false;
-    } catch { return false; }
+    // Mirror launder.naughtyHref: classify the scheme without requiring a fully parseable URL.
+    const scheme = href.match(/^([a-zA-Z][a-zA-Z0-9.\-+]*):/u);
+    if (scheme && !['http', 'https', 'mailto'].includes(scheme[1].toLowerCase())) return false;
   }
   if (tag === 'blockquote') {
     if (!element.hasAttribute('class')) return element.attributes.length === 0;
