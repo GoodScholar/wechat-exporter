@@ -496,6 +496,7 @@ test('真实 renderer 的 HTTPS 404 占位保留安全 ALT 且仅生成非阻断
 
 test('HTTPS 404 或中断在相同 target 原位变为可定位 load-failed advisory', async t => {
   const { page, base } = await withBrowser(t);
+  await page.route('**/api/typesetting/output', route => route.abort('failed'));
   await page.route('https://fixture.invalid/**', route => route.request().url().endsWith('/404.png')
     ? route.fulfill({ status: 404, contentType: 'image/png', body: '' })
     : route.abort('failed'));
@@ -650,6 +651,7 @@ test('旧 preview 图片 load error 和过期响应不能污染新 HTML diagnost
 test('静态不支持图片不发起网络请求且全部图片问题保持非阻断', async t => {
   const { page, base } = await withBrowser(t);
   const forbiddenRequests = [];
+  await page.route('**/api/typesetting/output', route => route.abort('failed'));
   for (const pattern of ['http://unsafe.invalid/**', 'http://protocol-relative.invalid/**']) {
     await page.route(pattern, route => { forbiddenRequests.push(route.request().url()); return route.abort('blockedbyclient'); });
   }
@@ -909,6 +911,7 @@ test('格式检查与定位在键盘 reduced-motion 和 390px 窄屏下可操作
 
 test('富文本 removed 合并为单条 conversion 并定位实际插入 UTF-16 范围', async t => {
   const { page, base } = await withBrowser(t);
+  await page.route('**/api/typesetting/output', route => route.abort('failed'));
   await page.route('https://fixture.invalid/audit.png', route => route.fulfill({ status: 404, contentType: 'image/png', body: '' }));
   await installRenderFixture(page, request => request.body ? {
     html: '<blockquote class="format-special-placeholder" role="note" tabindex="0" data-format-target="static-special"><p>特殊内容</p></blockquote><img src="https://fixture.invalid/audit.png" alt="审计图" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-image">',

@@ -1,0 +1,137 @@
+[
+  {
+    "name": "普通中文",
+    "document": {
+      "title": "示例标题",
+      "author": "张三",
+      "account": "示例公众号",
+      "publishedAt": "2026-10-03",
+      "body": "# 正文\n\n这是第一段。"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "示例标题.md",
+      "content": "---\ntitle: \"示例标题\"\nauthor: \"张三\"\naccount: \"示例公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n# 正文\n\n这是第一段。\n"
+    }
+  },
+  {
+    "name": "四项元信息空值",
+    "document": {
+      "title": "",
+      "author": "",
+      "account": "",
+      "publishedAt": "",
+      "body": "正文保留"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "未命名文章.md",
+      "content": "---\ntitle: \"\"\nauthor: \"\"\naccount: \"\"\npublishedAt: \"\"\n---\n\n正文保留\n"
+    }
+  },
+  {
+    "name": "特殊字符与多行元信息",
+    "document": {
+      "title": "引号\":#\\多行\r\n标题",
+      "author": "作者: \"甲\"\r乙",
+      "account": "#频道\\路径",
+      "publishedAt": "2026-10-03:\n草稿",
+      "body": "正文"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "引号__#_多行_标题.md",
+      "content": "---\ntitle: \"引号\\\":#\\\\多行\\n标题\"\nauthor: \"作者: \\\"甲\\\"\\n乙\"\naccount: \"#频道\\\\路径\"\npublishedAt: \"2026-10-03:\\n草稿\"\n---\n\n正文\n"
+    }
+  },
+  {
+    "name": "CRLF 与裸 CR 正文",
+    "document": {
+      "title": "换行正文",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "第一行\r\n第二行\r第三行\r\n\r\n"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "换行正文.md",
+      "content": "---\ntitle: \"换行正文\"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n第一行\n第二行\n第三行\n"
+    }
+  },
+  {
+    "name": "全点标题",
+    "document": {
+      "title": "  ...  ",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "正文"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "未命名文章.md",
+      "content": "---\ntitle: \"  ...  \"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n正文\n"
+    }
+  },
+  {
+    "name": "禁用字符与控制字符标题",
+    "document": {
+      "title": "报告<草案>:\"/\\|?*\u0001.",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "正文"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "报告_草案_________.md",
+      "content": "---\ntitle: \"报告<草案>:\\\"/\\\\|?*\\u0001.\"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n正文\n"
+    }
+  },
+  {
+    "name": "emoji 与 CJK 标题",
+    "document": {
+      "title": "微信导出🚀中文标题",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "正文"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "微信导出🚀中文标题.md",
+      "content": "---\ntitle: \"微信导出🚀中文标题\"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n正文\n"
+    }
+  },
+  {
+    "name": "超过 80 Unicode code point 标题",
+    "document": {
+      "title": "1234567890123456789012345678901234567890123456789012345678901234567890123456789🚀尾",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "正文"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "1234567890123456789012345678901234567890123456789012345678901234567890123456789🚀.md",
+      "content": "---\ntitle: \"1234567890123456789012345678901234567890123456789012345678901234567890123456789🚀尾\"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n正文\n"
+    }
+  },
+  {
+    "name": "正文空白逐字节保留",
+    "document": {
+      "title": "空白保持",
+      "author": "作者",
+      "account": "公众号",
+      "publishedAt": "2026-10-03",
+      "body": "  开头\r\n行尾  \r末行空白  \n\n"
+    },
+    "artifact": {
+      "mimeType": "text/markdown;charset=utf-8",
+      "filename": "空白保持.md",
+      "content": "---\ntitle: \"空白保持\"\nauthor: \"作者\"\naccount: \"公众号\"\npublishedAt: \"2026-10-03\"\n---\n\n  开头\n行尾  \n末行空白  \n"
+    }
+  }
+]

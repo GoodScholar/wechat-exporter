@@ -7,6 +7,15 @@ const importUrl = $('#import-url');
 const importMessage = $('#import-message');
 const renderStatus = $('#render-status');
 const formatChecks = $('#format-checks');
+const outputControls = {
+  copyWechat: $('#copy-wechat'),
+  copyMarkdown: $('#copy-markdown'),
+  downloadHtml: $('#download-html'),
+  downloadMarkdown: $('#download-markdown'),
+  status: $('#output-status'),
+  error: $('#output-error')
+};
+const metadataFieldNames = Object.freeze({ title: '标题', author: '作者', account: '公众号名称', publishedAt: '发布日期' });
 const themeNames = [...themeControls.theme.options].map(option => option.value);
 const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
 const documentKeys = [...Object.keys(fields), 'revision', 'savedAt', 'theme', 'themeSettings', 'convertExternalLinksToFootnotes'];
@@ -14,6 +23,16 @@ const severityNames = ['blocker', 'conversion', 'advisory'];
 const safeRemovedTypes = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
 const specialContentTypes = ['video', 'audio', 'embed', 'mini-program', 'poll'];
 const imageDiagnosticCodes = ['IMAGE_LOAD_FAILED', 'IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE'];
+const outputErrorDefinitions = Object.freeze({
+  OUTPUT_REQUEST_FORBIDDEN: Object.freeze({ status: 403, message: '排版输出请求被拒绝', retryable: false, localMessage: '当前请求来源或格式不受支持，仍可复制或下载 Markdown。' }),
+  OUTPUT_METHOD_NOT_ALLOWED: Object.freeze({ status: 405, message: '排版输出仅支持 POST 请求', retryable: false, localMessage: '输出请求方法不受支持，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_JSON_INVALID: Object.freeze({ status: 400, message: '排版输出 JSON 无效', retryable: false, localMessage: '输出请求格式无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_TOO_LARGE: Object.freeze({ status: 413, message: '排版输出请求过大', retryable: false, localMessage: '正文过长，请缩短正文后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_INVALID: Object.freeze({ status: 400, message: '排版输出请求无效', retryable: false, localMessage: '输出数据无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false, localMessage: '图片状态已变化，正在重新检查排版；仍可复制或下载 Markdown。' }),
+  OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true, localMessage: '未能生成富文本，请稍后重试；仍可复制或下载 Markdown。' })
+});
+const genericOutputErrorMessage = '未能生成富文本，请刷新页面后重试；仍可复制或下载 Markdown。';
 const previewAllowedTags = new Set([
   'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
   'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
@@ -44,6 +63,15 @@ let previewVersion = 0;
 let appliedRenderVersion = 0;
 let renderFresh = false;
 let renderBlocked = false;
+let appliedPresentation;
+let outputVersion = 0;
+let outputRequestVersion = 0;
+let outputFresh = false;
+let outputPending = false;
+let outputBundle;
+let outputCache;
+let outputActionToken = 0;
+const failedImageTargets = new Set();
 let staticDiagnostics = [];
 let dynamicImageDiagnostics = [];
 let dynamicImageDiagnosticSequence = 0;
@@ -75,6 +103,323 @@ function isValidPresentation(presentation) {
     && hasExactKeys(presentation.settings, themeSettingNames)
     && themeSettingNames.every(name => isKnownOption(themeControls[name], presentation.settings[name]));
 }
+function sameExactValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameExactValue(value, right[index]));
+  }
+  if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && sameExactValue(left[key], right[key]));
+}
+function sameOutputSnapshot(left, right) { return sameExactValue(left, right); }
+function isValidOutputSnapshot(snapshot) {
+  return hasExactKeys(snapshot, ['document', 'presentation', 'convertExternalLinksToFootnotes', 'failedImageTargets'])
+    && hasExactKeys(snapshot.document, ['title', 'author', 'account', 'publishedAt', 'body'])
+    && Object.values(snapshot.document).every(value => typeof value === 'string')
+    && isValidPresentation(snapshot.presentation)
+    && typeof snapshot.convertExternalLinksToFootnotes === 'boolean'
+    && Array.isArray(snapshot.failedImageTargets)
+    && snapshot.failedImageTargets.every(isNonEmptyString)
+    && new Set(snapshot.failedImageTargets).size === snapshot.failedImageTargets.length;
+}
+function isValidOutputArtifact(artifact, mimeType, filename = false) {
+  const keys = filename ? ['mimeType', 'filename', 'content'] : ['mimeType', 'content'];
+  return hasExactKeys(artifact, keys) && artifact.mimeType === mimeType
+    && (!filename || isNonEmptyString(artifact.filename)) && typeof artifact.content === 'string';
+}
+function parseTypedOutputError(status, payload) {
+  if (!hasExactKeys(payload, ['error']) || !hasExactKeys(payload.error, ['code', 'message', 'retryable'])) return;
+  const definition = outputErrorDefinitions[payload.error.code];
+  if (!definition || status !== definition.status || payload.error.message !== definition.message
+    || payload.error.retryable !== definition.retryable) return;
+  return { code: payload.error.code, localMessage: definition.localMessage };
+}
+function isValidOutputBundle(value, snapshot) {
+  if (!hasExactKeys(value, ['schemaVersion', 'status', 'snapshot', 'markdown', 'clipboard', 'html'])
+    || value.schemaVersion !== 1 || !['ready', 'blocked'].includes(value.status)
+    || !isValidOutputSnapshot(value.snapshot) || !sameOutputSnapshot(value.snapshot, snapshot)
+    || !sameExactValue(value.markdown, {
+      mimeType: 'text/markdown;charset=utf-8',
+      filename: `${safeOutputBaseName(snapshot.document.title)}.md`,
+      content: buildNormalizedMarkdown(snapshot.document)
+    })) return false;
+  if (value.status === 'blocked') return value.clipboard === null && value.html === null;
+  return hasExactKeys(value.clipboard, ['html', 'plain'])
+    && isValidOutputArtifact(value.clipboard.html, 'text/html')
+    && isValidOutputArtifact(value.clipboard.plain, 'text/plain')
+    && isValidOutputArtifact(value.html, 'text/html;charset=utf-8', true)
+    && value.html.filename === `${safeOutputBaseName(snapshot.document.title)}.html`;
+}
+function normalizeOutputString(value) { return value.replace(/\r\n?/gu, '\n'); }
+function safeOutputBaseName(title) {
+  let basename = normalizeOutputString(title).trim().replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '_');
+  basename = basename.replace(/^\.+/u, '').replace(/[. ]+$/u, '');
+  basename = [...basename].slice(0, 80).join('').replace(/[. ]+$/u, '');
+  return basename || '未命名文章';
+}
+function buildNormalizedMarkdown(document) {
+  const normalized = Object.fromEntries(Object.entries(document).map(([key, value]) => [key, normalizeOutputString(value)]));
+  const body = normalized.body.replace(/\n+$/u, '');
+  return [
+    '---',
+    `title: ${JSON.stringify(normalized.title)}`,
+    `author: ${JSON.stringify(normalized.author)}`,
+    `account: ${JSON.stringify(normalized.account)}`,
+    `publishedAt: ${JSON.stringify(normalized.publishedAt)}`,
+    '---',
+    '',
+    `${body}\n`
+  ].join('\n');
+}
+function currentOutputDocument() {
+  return Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value]));
+}
+function outputSnapshot() {
+  const orderedTargets = [...$('#preview').querySelectorAll('[data-format-target]')]
+    .map(node => node.getAttribute('data-format-target'))
+    .filter(target => failedImageTargets.has(target));
+  return {
+    document: currentOutputDocument(),
+    presentation: appliedPresentation && {
+      theme: appliedPresentation.theme,
+      settings: { ...appliedPresentation.settings }
+    },
+    convertExternalLinksToFootnotes: convertExternalLinks.checked,
+    failedImageTargets: orderedTargets
+  };
+}
+function invalidateOutput() {
+  outputActionToken++;
+  outputVersion++;
+  outputFresh = false;
+  outputPending = false;
+  outputBundle = undefined;
+  outputCache = undefined;
+  syncOutputControls();
+}
+function isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot) {
+  return requestVersion === outputRequestVersion && version === outputVersion
+    && renderVersion === appliedRenderVersion && renderVersion === previewVersion
+    && renderFresh && sameOutputSnapshot(outputSnapshot(), snapshot);
+}
+async function requestOutput() {
+  if (!renderFresh || appliedRenderVersion !== previewVersion || !appliedPresentation) return;
+  outputFresh = false;
+  outputPending = true;
+  outputBundle = undefined;
+  outputCache = undefined;
+  syncOutputControls();
+  const requestVersion = ++outputRequestVersion;
+  const version = outputVersion;
+  const renderVersion = appliedRenderVersion;
+  const snapshot = outputSnapshot();
+  try {
+    const response = await fetch('/api/typesetting/output', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(snapshot)
+    });
+    if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+    if (!response.ok) {
+      let errorPayload;
+      try { errorPayload = await response.json(); } catch { /* Treat malformed error responses as ordinary output failures. */ }
+      if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+      outputPending = false;
+      const typedError = parseTypedOutputError(response.status, errorPayload);
+      if (typedError?.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID') {
+        markRenderStale();
+        schedulePreview();
+        syncOutputControls('failure', typedError.localMessage);
+        return;
+      }
+      syncOutputControls('failure', typedError?.localMessage || genericOutputErrorMessage);
+      return;
+    }
+    const bundle = await response.json();
+    if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+    if (!isValidOutputBundle(bundle, snapshot) || (bundle.status === 'blocked') !== renderBlocked) {
+      outputPending = false;
+      syncOutputControls('failure');
+      return;
+    }
+    outputBundle = bundle;
+    outputCache = { outputVersion: version, renderVersion, snapshot, bundle };
+    outputFresh = true;
+    outputPending = false;
+    syncOutputControls();
+  } catch {
+    if (isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) {
+      outputPending = false;
+      syncOutputControls('failure');
+    }
+  }
+}
+function hasFreshOutput() {
+  if (!renderFresh || !outputFresh || outputPending || !outputBundle || !outputCache) return false;
+  const snapshot = outputSnapshot();
+  return outputCache.outputVersion === outputVersion
+    && outputCache.renderVersion === appliedRenderVersion
+    && appliedRenderVersion === previewVersion
+    && outputCache.bundle === outputBundle
+    && sameOutputSnapshot(outputCache.snapshot, snapshot)
+    && sameOutputSnapshot(outputBundle.snapshot, snapshot)
+    && (outputBundle.status === 'blocked') === renderBlocked;
+}
+function hasFreshReadyOutput() { return hasFreshOutput() && !renderBlocked && outputBundle.status === 'ready'; }
+function currentMarkdownArtifact() {
+  if (hasFreshOutput()) return outputBundle.markdown;
+  const document = currentOutputDocument();
+  return {
+    mimeType: 'text/markdown;charset=utf-8',
+    filename: `${safeOutputBaseName(document.title)}.md`,
+    content: buildNormalizedMarkdown(document)
+  };
+}
+function clearOutputMessages() {
+  outputControls.status.textContent = '';
+  outputControls.error.textContent = '';
+}
+function startOutputAction() {
+  const token = ++outputActionToken;
+  clearOutputMessages();
+  return token;
+}
+function syncOutputControls(state = '', failureMessage = genericOutputErrorMessage) {
+  const ready = hasFreshReadyOutput();
+  outputControls.copyWechat.disabled = !ready;
+  outputControls.downloadHtml.disabled = !ready;
+  outputControls.copyMarkdown.disabled = false;
+  outputControls.downloadMarkdown.disabled = false;
+  clearOutputMessages();
+  if (state === 'failure') {
+    outputControls.error.textContent = failureMessage;
+    return;
+  }
+  if (outputPending) {
+    outputControls.status.textContent = '正在准备输出';
+    return;
+  }
+  if (hasFreshOutput() && outputBundle.status === 'blocked') {
+    outputControls.status.textContent = '存在阻断问题，仍可复制或下载 Markdown';
+    return;
+  }
+  if (ready) outputControls.status.textContent = '输出已准备';
+}
+function showOutputSuccess(token, message) {
+  if (token !== outputActionToken) return;
+  outputControls.status.textContent = message;
+  outputControls.error.textContent = '';
+}
+function showOutputFailure(token, message) {
+  if (token !== outputActionToken) return;
+  outputControls.status.textContent = '';
+  outputControls.error.textContent = message;
+}
+function currentRichOutputAction(action) {
+  return action.token === outputActionToken && hasFreshReadyOutput()
+    && action.outputVersion === outputVersion
+    && action.renderVersion === appliedRenderVersion && action.renderVersion === previewVersion
+    && action.bundle === outputBundle && action.cache === outputCache
+    && sameOutputSnapshot(action.snapshot, outputSnapshot());
+}
+async function copyWechatOutput() {
+  const token = startOutputAction();
+  if (!hasFreshReadyOutput()) {
+    showOutputFailure(token, '富文本输出尚未准备好，请复制或下载 Markdown。');
+    return;
+  }
+  const action = {
+    token,
+    outputVersion,
+    renderVersion: appliedRenderVersion,
+    snapshot: outputSnapshot(),
+    bundle: outputBundle,
+    cache: outputCache
+  };
+  try {
+    if (window.isSecureContext !== true || typeof navigator.clipboard?.write !== 'function'
+      || typeof window.ClipboardItem !== 'function') throw new Error('clipboard unsupported');
+    if (typeof window.ClipboardItem.supports === 'function'
+      && (!window.ClipboardItem.supports('text/html') || !window.ClipboardItem.supports('text/plain'))) throw new Error('clipboard MIME unsupported');
+    const item = new window.ClipboardItem({
+      'text/html': new Blob([action.bundle.clipboard.html.content], { type: action.bundle.clipboard.html.mimeType }),
+      'text/plain': new Blob([action.bundle.clipboard.plain.content], { type: action.bundle.clipboard.plain.mimeType })
+    });
+    await navigator.clipboard.write([item]);
+    if (currentRichOutputAction(action)) showOutputSuccess(token, '已复制正文富文本');
+  } catch {
+    if (currentRichOutputAction(action)) showOutputFailure(token, '未能复制富文本，请复制 Markdown 或下载 HTML');
+  }
+}
+async function copyMetadataField(name) {
+  const token = startOutputAction();
+  const label = metadataFieldNames[name];
+  const value = fields[name].value;
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
+    await navigator.clipboard.writeText(value);
+    showOutputSuccess(token, `已复制${label}`);
+  } catch {
+    showOutputFailure(token, `未能复制${label}`);
+  }
+}
+async function copyMarkdownOutput() {
+  const token = startOutputAction();
+  const artifact = currentMarkdownArtifact();
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
+    await navigator.clipboard.writeText(artifact.content);
+    showOutputSuccess(token, '已复制 Markdown');
+  } catch {
+    showOutputFailure(token, '未能复制 Markdown，请下载 Markdown');
+  }
+}
+function downloadArtifact(artifact) {
+  const blob = new Blob([artifact.content], { type: artifact.mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = artifact.filename;
+  document.body.append(anchor);
+  anchor.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    anchor.remove();
+  }, 0);
+}
+function downloadHtmlOutput() {
+  const token = startOutputAction();
+  if (!hasFreshReadyOutput()) {
+    showOutputFailure(token, 'HTML 输出尚未准备好，请下载 Markdown。');
+    return;
+  }
+  try {
+    downloadArtifact(outputBundle.html);
+    showOutputSuccess(token, '已下载 HTML');
+  } catch {
+    showOutputFailure(token, '未能下载 HTML，请下载 Markdown。');
+  }
+}
+function downloadMarkdownOutput() {
+  const token = startOutputAction();
+  try {
+    downloadArtifact(currentMarkdownArtifact());
+    showOutputSuccess(token, '已下载 Markdown');
+  } catch {
+    showOutputFailure(token, '未能下载 Markdown');
+  }
+}
+for (const button of document.querySelectorAll('[data-copy-field]')) {
+  button.addEventListener('click', () => { void copyMetadataField(button.dataset.copyField); });
+}
+outputControls.copyWechat.addEventListener('click', () => { void copyWechatOutput(); });
+outputControls.copyMarkdown.addEventListener('click', () => { void copyMarkdownOutput(); });
+outputControls.downloadHtml.addEventListener('click', downloadHtmlOutput);
+outputControls.downloadMarkdown.addEventListener('click', downloadMarkdownOutput);
+syncOutputControls();
 function isNonEmptyString(value) { return typeof value === 'string' && value.length > 0; }
 function isPositiveInteger(value) { return Number.isSafeInteger(value) && value > 0; }
 function isSourceTarget(target, body) {
@@ -406,6 +751,11 @@ function settleImage(img, previewRoot, version, failed = false) {
 
   const target = img.getAttribute('data-format-target');
   const alt = normalizeRuntimeImageAlt(img.alt);
+  const firstFailure = !failedImageTargets.has(target);
+  if (firstFailure) {
+    failedImageTargets.add(target);
+    invalidateOutput();
+  }
   removePendingImageHandlers(img);
   const placeholder = document.createElement('figure');
   placeholder.className = 'format-image-placeholder';
@@ -425,6 +775,7 @@ function settleImage(img, previewRoot, version, failed = false) {
     targets: [{ kind: 'preview', id: target }]
   });
   renderDiagnosticGroups(version);
+  if (firstFailure) void requestOutput();
 }
 function attachPendingImageHandlers(previewRoot, version) {
   for (const img of previewRoot.querySelectorAll('img[data-image-state="pending"]')) {
@@ -440,6 +791,8 @@ function attachPendingImageHandlers(previewRoot, version) {
   }
 }
 function applyRenderResult(rendered, detachedPreview, version) {
+  invalidateOutput();
+  failedImageTargets.clear();
   const currentPreview = $('#preview');
   const nextPreview = currentPreview.cloneNode(false);
   nextPreview.replaceChildren(...detachedPreview.childNodes);
@@ -447,11 +800,13 @@ function applyRenderResult(rendered, detachedPreview, version) {
   staticDiagnostics = rendered.diagnostics;
   dynamicImageDiagnostics = [];
   renderBlocked = rendered.blocked;
+  appliedPresentation = { theme: rendered.presentation.theme, settings: { ...rendered.presentation.settings } };
   appliedRenderVersion = version;
   renderFresh = true;
   currentPreview.replaceWith(nextPreview);
   renderDiagnosticGroups(version);
   syncRenderStatus('current');
+  void requestOutput();
   attachPendingImageHandlers(nextPreview, version);
 }
 async function preview(version, snapshot) {
@@ -515,29 +870,32 @@ async function flushSave() {
   return true;
 }
 function recordDocumentChange() {
+  invalidateOutput();
   saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 }
 for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
-  if (name === 'body') {
-    if (controlledBodyInsertion) return;
-    clearRichTextAudit();
-  }
+  if (name === 'body' && controlledBodyInsertion) return;
   recordDocumentChange();
+  if (name === 'body') clearRichTextAudit();
 });
 convertExternalLinks.addEventListener('change', () => {
+  invalidateOutput();
   documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 themeControls.theme.addEventListener('change', () => {
+  invalidateOutput();
   documentModel.theme = themeControls.theme.value;
   syncThemeControls();
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 for (const name of themeSettingNames) themeControls[name].addEventListener('change', () => {
+  invalidateOutput();
   currentThemeSettings()[name] = themeControls[name].value;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 themeControls.reset.addEventListener('click', () => {
+  invalidateOutput();
   documentModel.themeSettings[documentModel.theme] = defaultThemeSettings()[documentModel.theme];
   syncThemeControls();
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
@@ -674,6 +1032,7 @@ importForm.addEventListener('submit', async event => {
     }
     clearTimeout(saveTimer);
     dirty = false;
+    invalidateOutput();
     hydrateDocument(result.document, true);
     schedulePreview();
     setStatus('已保存');
