@@ -199,6 +199,35 @@ test('输出依赖和共享 Markdown fixture 固定版本与完整 artifact shap
   assert.equal(whitespace.artifact.content.split('---\n\n')[1], '  开头\n行尾  \n末行空白  \n');
 });
 
+test('第三方 notice 精确记录 doocs 三 helper 与 Juice 固定版本许可边界', async () => {
+  const notice = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
+  for (const token of [
+    'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
+    'WTFPL',
+    'solveWeChatImage',
+    'modifyHtmlStructure',
+    'createEmptyNode',
+    'src/typesetting-output.js',
+    '11.0.3',
+    'ce15687713507252813744b0daaa70d4549527d1',
+    'MIT',
+    'Automattic',
+    '>=18.17',
+    'string public API',
+    'juiceResources()',
+    'juiceFile()',
+    'active deviation',
+    'fallback'
+  ]) assert.match(notice, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+
+  assert.match(notice, /Clipboard API[\s\S]*Blob[\s\S]*object URL[\s\S]*browser standards/iu);
+  assert.match(notice, /not copied the complete doocs clipboard\s+pipeline/iu);
+  assert.match(notice, /has not completed compatibility acceptance in the real WeChat Official\s+Account editor/iu);
+
+  const doocsLicense = await readFile(new URL('../LICENSES/DOOCS-MD-WTFPL-2.txt', import.meta.url), 'utf8');
+  assert.match(doocsLicense, /DO WHAT THE FUCK YOU WANT TO PUBLIC LICENSE/u);
+});
+
 test('输出 builder 只接受 exact 四键请求和 exact 五键 document', async () => {
   const { createTypesettingOutputBuilder } = await loadOutputModule();
   const renderCalls = [];
