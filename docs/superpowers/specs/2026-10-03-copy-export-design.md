@@ -299,7 +299,7 @@ Juice 输出先移除主题根及正文节点上的 class、id、残余 CSS vari
 - 所有允许标签最多有 `style`；未知属性直接使生成失败，不静默保留。
 - `a` 额外允许 `href`、`title`，并精确镜像 #6 `hasAllowedPreviewElement()` / `launder.naughtyHref` 的分类语义：先把用于分类的 href 移除 U+0000～U+0020 和 HTML comment；`/^[\\/]{2}/u` 匹配的任意两个斜线/反斜线组合视为协议相对并拒绝；若存在 `^[a-zA-Z][a-zA-Z0-9.\-+]*:` scheme，只允许大小写不敏感的 `http`、`https`、`mailto`；没有 scheme 的 relative URL 与 fragment 允许。该检查不要求 WHATWG `URL` 可解析，也不额外禁止 HTTP/HTTPS credentials；href 仍必须已经通过 renderer/sanitizer 的既有属性安全边界。
 - `img` 额外允许 `src`、`alt`、`referrerpolicy`；src 必须是无凭据绝对 HTTPS，referrerpolicy 必须为 `no-referrer`。
-- `th` / `td` 额外允许规范正整数 `colspan` / `rowspan`。
+- `th` / `td` 额外允许 `colspan` / `rowspan`。其值完全镜像 #6 renderer 契约：只要已由 renderer/sanitizer 清理并保留，output 层就把属性字符串作为不透明值安全序列化，不再验证是否为数字、正数、规范十进制或浏览器有效跨度，也不得因此让原本 `blocked=false` 的合法 RenderResult 生成失败。
 - failed/static 占位可保留固定 `role="note"`；不保留 tabindex，因为下载/剪贴板产物不承担当前预览定位。
 - 禁止 `script`、`style`、`link`、`meta`、`form`、`input`、事件属性、任意 `data-*`、`contenteditable`、`target`、`download`、SVG/MathML 和 HTML 注释。
 
@@ -540,6 +540,7 @@ new ClipboardItem({
 - 三个主题与四项设置都产生内联 style，不残留 `<style>`、class、CSS variable、媒体查询、字体文件或远程 CSS。
 - `previewAllowedTags` 的每个标签都能通过输出标签白名单，任一标签都不会因 #7 自建窄集合被拒绝；白名单外标签仍失败。
 - `a.href` 覆盖 http/https/mailto、relative、fragment、HTTP credentials、控制字符/HTML comment laundering、协议相对和未知 scheme，结果与 #6 `hasAllowedPreviewElement()` 一致；不把 WHATWG URL parse 作为链接准入条件。
+- `th` / `td` 的 `colspan` / `rowspan` 固定覆盖非数字、`0`、负数、前导零和超大值；断言 renderer 已保留的属性字符串继续进入 clipboard/full HTML，status 保持 ready，不被 output 层二次数字校验拒绝。
 - 标题、段落、列表、引用、代码、分隔线、表格、链接、脚注、图片和两类占位通过最终白名单。
 - clipboard 的嵌套 ul/ol 在 Juice 后按 doocs 规则修正，同一 `li` 多个子列表也不反转；完整 HTML 保持 canonical 语义列表结构。
 - 数字和允许单位的图片尺寸正确转 style；危险/未知尺寸使整包失败；默认图片 `max-width:100%;height:auto`。
