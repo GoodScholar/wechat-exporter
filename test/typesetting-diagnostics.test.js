@@ -200,8 +200,8 @@ test('微信公众号文章链接只豁免严格 HTTPS 主机文章路径和无�
   for (const diagnostic of diagnostics) assertPreviewTargetsAreStrictAndPresent(result, diagnostic);
   assert.match(result.html, /href="https:\/\/mp\.weixin\.qq\.com\/s"/);
   assert.match(result.html, /href="https:\/\/mp\.weixin\.qq\.com\/s\/abc"/);
-  assert.match(result.html, /href="https:\/\/mp\.weixin\.qq\.com\/s\?id=1"/);
-  assert.match(result.html, /href="https:\/\/mp\.weixin\.qq\.com\/s\?id=2"/);
+  assert.match(result.html, /href="https:\/\/MP\.WEIXIN\.QQ\.COM\/s\?id=1"/);
+  assert.match(result.html, /href="https:\/\/mp\.weixin\.qq\.com:443\/s\?id=2"/);
 });
 
 test('特殊内容完整规范块重建单条 conversion 且来源不进入脚注', () => {
@@ -241,6 +241,54 @@ test('特殊内容完整规范块重建单条 conversion 且来源不进入脚�
     '> > [特殊内容：音频]'
   ].join('\n\n'), true));
   assert.equal(conversionDiagnostics(nonCanonical, 'SPECIAL_CONTENT_PLACEHOLDER').length, 0);
+});
+
+test('特殊内容非法来源被丢弃但仍重建占位且不进入脚注', () => {
+  const body = [
+    '> [特殊内容：视频] 来源：https://reader:secret@media.example/video',
+    '> [特殊内容：音频] 来源：file:///Users/private/audio.mp3',
+    '> [特殊内容：嵌入内容] 来源：data:text/html;base64,c2VudGluZWw=',
+    '> [特殊内容：小程序卡片] 来源：',
+    '> [特殊内容：投票] 来源：不是合法地址'
+  ].join('\n\n');
+  const result = renderTypesettingMarkdown(input(body, true));
+  const diagnostics = conversionDiagnostics(result, 'SPECIAL_CONTENT_PLACEHOLDER');
+
+  assert.deepEqual(diagnostics.map(item => item.meta), [
+    { type: 'video' },
+    { type: 'audio' },
+    { type: 'embed' },
+    { type: 'mini-program' },
+    { type: 'poll' }
+  ]);
+  assert.equal(conversionDiagnostics(result, 'EXTERNAL_LINK_TO_FOOTNOTE').length, 0);
+  assert.equal(result.html.match(/format-special-placeholder/g)?.length, 5);
+  assert.doesNotMatch(result.html + JSON.stringify(result.diagnostics), /reader|secret|media\.example|file:|\/Users\/private|data:|c2VudGluZWw|不是合法地址/);
+  assert.doesNotMatch(result.html, /<a\b/);
+});
+
+test('关闭脚注时保留 Marked autolink entity 和 angle URL cleanUrl 语义', () => {
+  const body = '<https://example.test/?name=&copy;>\n\n[angle](<https://example.test/a b>)';
+  const result = renderTypesettingMarkdown(input(body, false));
+
+  assert.deepEqual(result.diagnostics, []);
+  assert.match(result.html, /<a href="https:\/\/example\.test\/\?name=&amp;copy;">https:\/\/example\.test\/\?name=&amp;copy;<\/a>/);
+  assert.match(result.html, /<a href="https:\/\/example\.test\/a%20b">angle<\/a>/);
+  assert.doesNotMatch(result.html, /title=|data-format-target|<sup>|参考链接/);
+});
+
+test('开启脚注时沿用 Marked autolink 与 cleanUrl 输出后仅追加 target 和引用', () => {
+  const body = '<https://example.test/?name=&copy;>\n\n[angle](<https://example.test/a b>)';
+  const result = renderTypesettingMarkdown(input(body, true));
+  const diagnostics = conversionDiagnostics(result, 'EXTERNAL_LINK_TO_FOOTNOTE');
+
+  assert.deepEqual(diagnostics.map(item => item.meta), [
+    { footnote: 1, occurrences: 1 },
+    { footnote: 2, occurrences: 1 }
+  ]);
+  assert.match(result.html, /<a href="https:\/\/example\.test\/\?name=&amp;copy;" data-format-target="[^"]+">https:\/\/example\.test\/\?name=&amp;copy;<sup>\[1\]<\/sup><\/a>/);
+  assert.match(result.html, /<a href="https:\/\/example\.test\/a%20b" data-format-target="[^"]+">angle<sup>\[2\]<\/sup><\/a>/);
+  assert.doesNotMatch(result.html, /title=/);
 });
 
 test('脚注与特殊占位经过最终清理且多次 render 编号重置', () => {

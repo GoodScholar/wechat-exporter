@@ -64,6 +64,14 @@ function normalLinkHtml({ href, title, content, targetId, footnote }) {
   return `<a href="${escapeHtml(href)}"${titleAttribute}${targetAttribute}>${content}${reference}</a>`;
 }
 
+function decorateMarkedLink(html, targetId, footnote) {
+  const openingEnd = html.indexOf('>');
+  if (!html.startsWith('<a ') || openingEnd === -1 || !html.endsWith('</a>')) {
+    throw new TypeError('Marked link renderer returned an unexpected result');
+  }
+  return `${html.slice(0, openingEnd)} data-format-target="${escapeHtml(targetId)}"${html.slice(openingEnd, -4)}<sup>[${footnote}]</sup></a>`;
+}
+
 function parseHttpUrl(href) {
   try {
     const url = new URL(href);
@@ -87,13 +95,13 @@ function parseSpecialContent(token) {
   const text = token.tokens[0].text
     .replace(/^\\\[/u, '[')
     .replace(/\\\](?= 来源：|$)/u, ']');
-  const match = /^\[特殊内容：(视频|音频|嵌入内容|小程序卡片|投票)\](?: 来源：(.+))?$/u.exec(text);
+  const match = /^\[特殊内容：(视频|音频|嵌入内容|小程序卡片|投票)\](?: 来源：(.*))?$/u.exec(text);
   if (!match) return null;
 
   const [, label, source] = match;
   if (!source) return { label, type: specialContentTypeByLabel[label] };
   const url = parseHttpUrl(source);
-  if (!url || url.username || url.password) return null;
+  if (!url || url.username || url.password) return { label, type: specialContentTypeByLabel[label] };
   return { label, type: specialContentTypeByLabel[label], sourceUrl: url.href };
 }
 
@@ -219,22 +227,20 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
       };
 
       const renderer = new Renderer();
+      const defaultLink = renderer.link;
       renderer.link = function link(token) {
-        const content = this.parser.parseInline(token.tokens);
+        if (!convertExternalLinksToFootnotes) return defaultLink.call(this, token);
+
         const url = parseHttpUrl(token.href);
-        const title = token.title || token.text;
 
         // Adapted from doocs/md renderer.link(): keep the WeChat exception before
         // ordinary external-link conversion, with an exact URL-parser boundary.
-        if (url && isWeChatArticle(url)) {
-          return normalLinkHtml({ href: url.href, title, content });
-        }
-        if (url && convertExternalLinksToFootnotes) {
-          const target = createTarget('link');
-          const footnote = addFootnote(title || url.href, url.href, target);
-          return normalLinkHtml({ href: url.href, title, content, targetId: target.id, footnote });
-        }
-        return normalLinkHtml({ href: token.href, title: token.title, content });
+        if (!url || isWeChatArticle(url)) return defaultLink.call(this, token);
+
+        const rendered = defaultLink.call(this, { ...token, href: url.href });
+        const target = createTarget('link');
+        const footnote = addFootnote(token.title || token.text || url.href, url.href, target);
+        return decorateMarkedLink(rendered, target.id, footnote);
       };
       renderer.blockquote = function blockquote(token) {
         const special = blockquoteDepth === 0 ? parseSpecialContent(token) : null;
