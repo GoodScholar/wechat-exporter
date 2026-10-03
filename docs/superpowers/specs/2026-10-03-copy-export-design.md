@@ -68,7 +68,7 @@
           → canonical 内联正文最终白名单
           ├─ 安全文档壳 + 元信息 + canonical 正文 HTML
           └─ clipboard 派生副本
-              → 嵌套列表 / 图片尺寸修正
+              → 嵌套列表 / 图片兼容适配
               → clipboard 最终白名单
               → 正文 clipboard HTML + 块语义 plain text
       → strict OutputBundle
@@ -232,6 +232,8 @@ createTypesettingOutputBuilder({
 
 先严格规范化请求，再调用现有 renderer。必须校验 renderer 结果仍为四键严格 `RenderResult`，`blocked` 与 blocker 严格等价。输出模块不能直接调用 `marked`、复制 renderer HTML 拼装逻辑或重算外链脚注。
 
+输出后续步骤只消费 `RenderResult.html` 这份已通过 #6 sanitizer 的合法 HTML。当前 renderer 在形成 RenderResult 前已删除 `<img width>` / `<img height>`，固定 Juice options 又关闭 `applyWidthAttributes` / `applyHeightAttributes`，因此公开 builder 不存在可恢复的 raw 图片尺寸属性。output 不得为了找回它们重新解析源 Markdown、读取 raw token、绕过 sanitizer 或扩展四键 RenderResult。
+
 同时按本规格生成 Markdown；因此即使 renderer 返回 blocker，仍可立即返回 blocked bundle。
 
 ### 2. 运行时坏图合并
@@ -282,8 +284,8 @@ Juice 输出先移除主题根及正文节点上的 class、id、残余 CSS vari
 随后克隆 `canonicalInlineBody` 为 clipboard 派生 DOM，并按固定顺序执行：
 
 1. `modifyHtmlStructure()`：把 `li > ul/ol` 移到父 `li` 之后，保持原节点和顺序；同一 `li` 有多个直接子列表时也必须保持原相对顺序，主动修正上游逐项 `afterend` 可能导致的反转；
-2. `solveWeChatImage()`：把允许的 width/height 属性移到 style；纯整数转 `px`，只额外接受 `px | % | em | rem` 的非负有限长度和 `auto`（仅 height）；其他值使生成失败；
-3. 所有剩余图片确保 `display:block;max-width:100%`；没有显式安全高度时设 `height:auto`；保留 `src`、安全 alt 和 `referrerpolicy="no-referrer"`；
+2. `solveWeChatImage()`：作为与固定 doocs 源码相同的兼容适配运行；只有未来安全派生 DOM 确实出现可达 `width` / `height` 属性时，才按上游行为移除属性并迁入 style。当前公开 builder 的 renderer → Juice 路径不会产生这些属性，因此不要求该 helper 在当前产物上发生可观察转换，也不为触发它重解析 Markdown 或扩大上游契约；
+3. 当前实际图片尺寸合同来自固定主题经 Juice 内联的 `display:block;max-width:100%;height:auto`。所有保留图片最终都必须具有这些安全 style、没有 `width` / `height` HTML 属性，并保留 `src`、安全 alt 和 `referrerpolicy="no-referrer"`；
 4. 再次逐节点执行同一最终白名单和防御性 sanitizer 一致性检查。
 
 `createEmptyNode()` 在最终正文已通过检查后调用两次，只包围 clipboard HTML。完整 HTML 不加入这两个边界，plain text 遍历也忽略它们。
@@ -307,7 +309,7 @@ Juice 输出先移除主题根及正文节点上的 class、id、残余 CSS vari
 
 `color`、`background`、`background-color`、`font`、`font-family`、`font-size`、`font-weight`、`font-style`、`line-height`、`letter-spacing`、`text-align`、`text-decoration`、`text-underline-offset`、`white-space`、`overflow-wrap`、`word-break`、`vertical-align`、`display`、`width`、`max-width`、`height`、`max-height`、`margin` 及四边、`padding` 及四边、`border` 及四边、`border-width`、`border-style`、`border-color`、`border-radius`、`border-collapse`、`table-layout`、`list-style-type`、`overflow`。
 
-style value 必须来自固定主题 CSS 或受控图片尺寸；统一拒绝控制字符、反斜线逃逸、`url(`、`@import`、`expression`、`javascript:`、`data:`、`blob:`、`var(`、`env(`、`attr(`、`behavior` 和未知函数。只允许固定颜色、已知字体列表、关键字、有限数字、`px/em/rem/%` 长度及由固定主题产生的简单 `calc()`；出现无法解析的 declaration 不做“尽量保留”，而是整包失败。
+style value 必须来自固定主题 CSS；若未来安全派生 DOM 存在可达尺寸属性，`solveWeChatImage()` 迁入的 declaration 也必须通过同一 style 白名单。统一拒绝控制字符、反斜线逃逸、`url(`、`@import`、`expression`、`javascript:`、`data:`、`blob:`、`var(`、`env(`、`attr(`、`behavior` 和未知函数。只允许固定颜色、已知字体列表、关键字、有限数字、`px/em/rem/%` 长度及由固定主题产生的简单 `calc()`；出现无法解析的 declaration 不做“尽量保留”，而是整包失败。
 
 最终再用 `sanitize-html` 的独立输出策略清理序列化 fragment，并比较规范化 DOM。若标签、属性、文本或 style 与白名单验证后的 DOM 不一致，视为内部安全契约漂移，返回 500，不输出部分结果。
 
@@ -543,7 +545,7 @@ new ClipboardItem({
 - `th` / `td` 的 `colspan` / `rowspan` 固定覆盖非数字、`0`、负数、前导零和超大值；断言 renderer 已保留的属性字符串继续进入 clipboard/full HTML，status 保持 ready，不被 output 层二次数字校验拒绝。
 - 标题、段落、列表、引用、代码、分隔线、表格、链接、脚注、图片和两类占位通过最终白名单。
 - clipboard 的嵌套 ul/ol 在 Juice 后按 doocs 规则修正，同一 `li` 多个子列表也不反转；完整 HTML 保持 canonical 语义列表结构。
-- 数字和允许单位的图片尺寸正确转 style；危险/未知尺寸使整包失败；默认图片 `max-width:100%;height:auto`。
+- 当前公开 builder 的图片断言最终安全内联 style 包含 `display:block;max-width:100%;height:auto`，且不存在 `width` / `height` HTML 属性；不构造 renderer 已经删除的 raw attribute 数字、`px/%/em/rem` 用例。额外或未知 style declaration 仍由白名单使整包失败。
 - 运行时失败图在同位置成为不含 src 的占位，alt 安全且不泄漏 URL；静态占位和坏图都保持 ready。
 - clipboard HTML 恰有首尾边界，完整 HTML 没有；所有 data target/runtime attrs 被移除。
 
@@ -651,7 +653,7 @@ Issue #7 只有在以下条件全部满足时，才可声明本规格范围完�
 - strict request/response/error、ready/blocked 判别和全部竞态规则有可复现测试；
 - 富文本只在双 MIME `clipboard.write()` resolve 后成功，所有拒绝/不支持路径不伪成功；
 - 元信息与正文边界、Markdown front matter/LF、完整 HTML 安全壳和文件名规则全部按本规格实现；
-- 三个主题、脚注、静态占位、运行时坏图、列表、表格、代码、图片尺寸和块级 plain text 通过结构断言；
+- 三个主题、脚注、静态占位、运行时坏图、列表、表格、代码、最终图片安全内联样式和块级 plain text 通过结构断言；
 - Juice 任意失败均无富文本/HTML partial success；
 - `juice@11.0.3` 精确锁定，doocs/Juice 来源、许可证、复制/调用范围及主动偏离已写入 `THIRD_PARTY_NOTICES.md`；
 - #3～#6 相关回归、全量测试、语法检查和 diff 检查通过；
