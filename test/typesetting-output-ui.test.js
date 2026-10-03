@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { once } from 'node:events';
 import { readFile, mkdtemp, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
@@ -11,6 +13,7 @@ const fixturePath = new URL('./fixtures/typesetting-output-artifacts.json', impo
 const artifactFixtures = JSON.parse(await readFile(fixturePath, 'utf8'));
 const settings = Object.freeze({ primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' });
 const onePixelPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
+const serverModuleUrl = new URL('../src/server.js', import.meta.url).href;
 
 async function serve(app) {
   const server = app.listen(0, '127.0.0.1');
@@ -26,7 +29,7 @@ async function withBrowser(t, { initScript } = {}) {
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
   const browser = await chromium.launch({ ...browserOptions(), headless: true });
   const context = await browser.newContext();
-  if (initScript) await context.addInitScript(initScript);
+  for (const script of [initScript].flat().filter(Boolean)) await context.addInitScript(script);
   const page = await context.newPage();
   page.setDefaultTimeout(6000);
   t.after(async () => {
@@ -35,6 +38,36 @@ async function withBrowser(t, { initScript } = {}) {
     await rm(root, { recursive: true, force: true });
   });
   return { page, base: server.base };
+}
+
+async function startIsolatedServer(t) {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-output-restart-'));
+  const source = `
+    import { createApp } from ${JSON.stringify(serverModuleUrl)};
+    const app = createApp({ dataDir: process.env.TASK7_DATA_DIR, interval: 0 });
+    const server = app.listen(0, '127.0.0.1', () => process.send({ port: server.address().port }));
+  `;
+  const child = spawn(process.execPath, ['--input-type=module', '--eval', source], {
+    env: { ...process.env, TASK7_DATA_DIR: path.join(root, '.data') },
+    stdio: ['ignore', 'ignore', 'pipe', 'ipc']
+  });
+  let stderr = '';
+  child.stderr.setEncoding('utf8');
+  child.stderr.on('data', chunk => { stderr += chunk; });
+  const port = await new Promise((resolve, reject) => {
+    const timeout = setTimeout(() => reject(new Error(`等待独立服务启动超时: ${stderr}`)), 6000);
+    child.once('message', message => { clearTimeout(timeout); resolve(message.port); });
+    child.once('error', error => { clearTimeout(timeout); reject(error); });
+    child.once('exit', code => { clearTimeout(timeout); reject(new Error(`独立服务提前退出 ${code}: ${stderr}`)); });
+  });
+  t.after(async () => {
+    if (child.exitCode === null) {
+      child.kill('SIGTERM');
+      await once(child, 'exit');
+    }
+    await rm(root, { recursive: true, force: true });
+  });
+  return { base: `http://127.0.0.1:${port}` };
 }
 
 function escapeHtml(value) {
@@ -146,6 +179,7 @@ function installOutputBrowserSpies() {
       window.__clipboardItems.push(this);
     }
   }
+  window.__TestClipboardItem = TestClipboardItem;
   window.ClipboardItem = TestClipboardItem;
   Object.defineProperty(navigator, 'clipboard', {
     configurable: true,
@@ -179,6 +213,35 @@ function installOutputBrowserSpies() {
   HTMLAnchorElement.prototype.click = function () {
     window.__downloadClicks.push({ download: this.download, href: this.href, connected: this.isConnected, anchor: this });
   };
+}
+
+function installPendingImageSpies() {
+  window.__imageHandlers = new Map();
+  const nativeAdd = EventTarget.prototype.addEventListener;
+  const nativeRemove = EventTarget.prototype.removeEventListener;
+  EventTarget.prototype.addEventListener = function (type, listener, options) {
+    if (this instanceof HTMLImageElement && this.src.startsWith('https://fixture.invalid/') && (type === 'load' || type === 'error')) {
+      const handlers = window.__imageHandlers.get(this) || {};
+      handlers[type] = listener;
+      window.__imageHandlers.set(this, handlers);
+      return;
+    }
+    return nativeAdd.call(this, type, listener, options);
+  };
+  EventTarget.prototype.removeEventListener = function (type, listener, options) {
+    if (this instanceof HTMLImageElement && window.__imageHandlers.has(this) && (type === 'load' || type === 'error')) return;
+    return nativeRemove.call(this, type, listener, options);
+  };
+  const complete = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'complete');
+  const naturalWidth = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'naturalWidth');
+  Object.defineProperty(HTMLImageElement.prototype, 'complete', {
+    configurable: true,
+    get() { return this.src.startsWith('https://fixture.invalid/') ? false : complete.get.call(this); }
+  });
+  Object.defineProperty(HTMLImageElement.prototype, 'naturalWidth', {
+    configurable: true,
+    get() { return this.dataset.testLoaded === 'true' ? 1 : naturalWidth.get.call(this); }
+  });
 }
 
 test('客户端本地 Markdown artifact 与服务端共享 fixture 深度相等', async t => {
@@ -452,36 +515,149 @@ test('慢旧 success failure 与非二百 malformed schema snapshot status 均�
   }
 });
 
-test('图片 loaded 不失效而首次 error 按当前 DOM 顺序重建且重复旧事件无效', async t => {
-  const imageInitScript = () => {
-    window.__imageHandlers = new Map();
-    const nativeAdd = EventTarget.prototype.addEventListener;
-    const nativeRemove = EventTarget.prototype.removeEventListener;
-    EventTarget.prototype.addEventListener = function (type, listener, options) {
-      if (this instanceof HTMLImageElement && this.src.startsWith('https://fixture.invalid/') && (type === 'load' || type === 'error')) {
-        const handlers = window.__imageHandlers.get(this) || {};
-        handlers[type] = listener;
-        window.__imageHandlers.set(this, handlers);
-        return;
-      }
-      return nativeAdd.call(this, type, listener, options);
-    };
-    EventTarget.prototype.removeEventListener = function (type, listener, options) {
-      if (this instanceof HTMLImageElement && window.__imageHandlers.has(this) && (type === 'load' || type === 'error')) return;
-      return nativeRemove.call(this, type, listener, options);
-    };
-    const complete = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'complete');
-    const naturalWidth = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'naturalWidth');
-    Object.defineProperty(HTMLImageElement.prototype, 'complete', {
-      configurable: true,
-      get() { return this.src.startsWith('https://fixture.invalid/') ? false : complete.get.call(this); }
-    });
-    Object.defineProperty(HTMLImageElement.prototype, 'naturalWidth', {
-      configurable: true,
-      get() { return this.dataset.testLoaded === 'true' ? 1 : naturalWidth.get.call(this); }
-    });
+test('慢旧 output 成功失败均不能覆盖五字段正文主题设置 reset 脚注的新 snapshot', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const calls = [];
+  const held = [];
+  const live = [];
+  let holdNext = false;
+  let marker = 0;
+  await installRenderRoute(page);
+  await installOutputRoute(page, calls, async (route, request) => {
+    if (holdNext) {
+      holdNext = false;
+      const outcome = await new Promise(resolve => held.push({ request, resolve }));
+      if (outcome === 'failure') return route.abort('failed');
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request, { marker: `old-${++marker}` })) });
+    }
+    const bundle = outputBundle(request, { marker: `live-${++marker}` });
+    live.push({ request: structuredClone(request), bundle });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(bundle) });
+  });
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('竞态正文-0');
+  await waitForReadyOutput(page);
+
+  let valueSequence = 0;
+  const selectDifferent = async label => {
+    const control = page.getByLabel(label);
+    const current = await control.inputValue();
+    const values = await control.locator('option').evaluateAll(options => options.map(option => option.value));
+    await control.selectOption(values.find(value => value !== current));
   };
-  const { page, base } = await withBrowser(t, { initScript: imageInitScript });
+  const scenarios = [
+    ['标题字段', () => page.getByLabel('标题').fill(`标题-${++valueSequence}`)],
+    ['作者字段', () => page.getByLabel('作者').fill(`作者-${++valueSequence}`)],
+    ['公众号字段', () => page.getByLabel('公众号名称').fill(`账号-${++valueSequence}`)],
+    ['发布日期字段', () => page.getByLabel('发布日期').fill(`2026-10-${String(++valueSequence % 28 + 1).padStart(2, '0')}`)],
+    ['正文字段', () => page.getByLabel('Markdown 正文').fill(`竞态正文-${++valueSequence}`)],
+    ['主题', () => selectDifferent('主题')],
+    ['主色设置', () => selectDifferent('主色')],
+    ['字号设置', () => selectDifferent('字号')],
+    ['行距设置', () => selectDifferent('行距')],
+    ['段间距设置', () => selectDifferent('段间距')],
+    ['reset', async () => {
+      await page.getByRole('button', { name: '恢复当前主题默认值' }).click();
+      assert.deepEqual(await page.evaluate(() => ({
+        primaryColor: document.querySelector('#theme-primary-color').value,
+        fontSize: document.querySelector('#theme-font-size').value,
+        lineHeight: document.querySelector('#theme-line-height').value,
+        blockSpacing: document.querySelector('#theme-block-spacing').value
+      })), settings);
+    }, async () => {
+      if (await page.getByLabel('主色').inputValue() === '#FA5151') await page.getByLabel('主色').selectOption('#009874');
+      else await page.getByLabel('主色').selectOption('#FA5151');
+      await waitForReadyOutput(page);
+    }],
+    ['脚注开关', () => page.getByLabel('外链转脚注').click()]
+  ];
+
+  for (const outcome of ['success', 'failure']) {
+    for (const [name, change, prepare] of scenarios) {
+      if (prepare) await prepare();
+      holdNext = true;
+      const heldCount = held.length;
+      await page.evaluate(() => { void window.requestOutput(); });
+      await waitForCount(held, heldCount + 1);
+      await change();
+      assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), false, `${name} 必须同步失效`);
+      await waitForReadyOutput(page);
+      const accepted = live.at(-1);
+      const statusBefore = await page.locator('#output-status').textContent();
+      const errorBefore = await page.locator('#output-error').textContent();
+      held.at(-1).resolve(outcome);
+      await page.waitForTimeout(60);
+      assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), true, `${name} ${outcome} 不得关闭新 gate`);
+      assert.deepEqual(await page.evaluate(() => window.outputSnapshot()), accepted.request, `${name} ${outcome} 必须保留新 snapshot`);
+      assert.deepEqual(await currentMarkdownArtifact(page), accepted.bundle.markdown, `${name} ${outcome} 不得恢复旧 Markdown`);
+      assert.equal(await page.locator('#output-status').textContent(), statusBefore, `${name} ${outcome} 不得覆盖 status`);
+      assert.equal(await page.locator('#output-error').textContent(), errorBefore, `${name} ${outcome} 不得覆盖 error`);
+      assert.equal(await page.locator('#copy-wechat').isEnabled(), true);
+      assert.equal(await page.locator('#download-html').isEnabled(), true);
+      assert.deepEqual(accepted.request.failedImageTargets, []);
+
+      const downloadCount = await page.evaluate(() => window.__downloadClicks.length);
+      await page.locator('#download-html').click();
+      await page.waitForFunction(count => window.__revokedUrls.length === count + 1, downloadCount);
+      const download = await page.evaluate(async index => ({
+        filename: window.__downloadClicks[index].download,
+        content: await window.__createdBlobs[index].text()
+      }), downloadCount);
+      assert.deepEqual(download, { filename: accepted.bundle.html.filename, content: accepted.bundle.html.content }, `${name} ${outcome} 下载必须保持新 artifact`);
+    }
+  }
+});
+
+test('render stale pending malformed 时旧 ready bundle 不能复制或下载 HTML', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  let renderMode = 'valid';
+  const held = [];
+  await page.route('**/api/typesetting/render', async route => {
+    const request = route.request().postDataJSON();
+    if (renderMode === 'pending') await new Promise(resolve => held.push(resolve));
+    if (renderMode === 'failure') return route.fulfill({ status: 500, contentType: 'application/json', body: '{}' });
+    if (renderMode === 'malformed') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...renderResult(request), extra: true }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(renderResult(request)) });
+  });
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('旧 ready');
+  await waitForReadyOutput(page);
+
+  const assertNoRichSideEffect = async label => {
+    const before = await page.evaluate(() => ({ writes: window.__clipboardWrites.length, blobs: window.__createdBlobs.length }));
+    await page.evaluate(() => {
+      document.querySelector('#copy-wechat').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+      document.querySelector('#download-html').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    });
+    await page.waitForTimeout(30);
+    assert.deepEqual(await page.evaluate(() => ({ writes: window.__clipboardWrites.length, blobs: window.__createdBlobs.length })), before, label);
+    assert.equal(await page.locator('#copy-wechat').isDisabled(), true, label);
+    assert.equal(await page.locator('#download-html').isDisabled(), true, label);
+  };
+
+  renderMode = 'pending';
+  await page.getByLabel('Markdown 正文').fill('render pending');
+  await waitForCount(held, 1);
+  await waitForRenderState(page, 'checking');
+  await assertNoRichSideEffect('pending');
+  renderMode = 'valid';
+  held.shift()();
+  await waitForReadyOutput(page);
+
+  renderMode = 'failure';
+  await page.getByLabel('Markdown 正文').fill('render stale');
+  await waitForRenderState(page, 'stale');
+  await assertNoRichSideEffect('stale');
+
+  renderMode = 'malformed';
+  await page.getByLabel('Markdown 正文').fill('render malformed');
+  await waitForRenderState(page, 'stale');
+  await assertNoRichSideEffect('malformed');
+});
+
+test('图片 loaded 不失效而首次 error 按当前 DOM 顺序重建且重复旧事件无效', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installPendingImageSpies });
   const calls = [];
   await page.route('https://fixture.invalid/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng }));
   await installRenderRoute(page, request => renderResult(request, request.body === '三张图片' ? [
@@ -536,6 +712,232 @@ test('图片 loaded 不失效而首次 error 按当前 DOM 顺序重建且重复
   await page.waitForTimeout(80);
   assert.equal(calls.length, afterNewRender, '旧 render 图片事件不得污染当前 failed set');
   assert.deepEqual(calls.at(-1).failedImageTargets, []);
+});
+
+test('坏图 snapshot 的慢旧 output 成功失败不能覆盖无 src 占位且新旧 DOM 事件隔离', async t => {
+  const { page, base } = await withBrowser(t, { initScript: [installOutputBrowserSpies, installPendingImageSpies] });
+  const calls = [];
+  const held = [];
+  let holdNext = false;
+  let imageVersion = 0;
+  await page.route('https://fixture.invalid/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng }));
+  await installRenderRoute(page, request => {
+    if (!request.body.startsWith('坏图竞态')) return renderResult(request);
+    const suffix = request.body.split('-').at(-1);
+    return renderResult(request, `<img src="https://fixture.invalid/${suffix}.png" alt="坏图 ${suffix}" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="image-${suffix}">`);
+  });
+  await installOutputRoute(page, calls, async (route, request) => {
+    if (holdNext) {
+      holdNext = false;
+      const outcome = await new Promise(resolve => held.push({ request, resolve }));
+      if (outcome === 'failure') return route.abort('failed');
+    }
+    const bundle = outputBundle(request, { marker: request.failedImageTargets.join(',') || `clean-${++imageVersion}` });
+    if (request.failedImageTargets.length) {
+      const placeholder = '<figure role="note"><figcaption>图片加载失败。请检查图片地址后重试。</figcaption></figure>';
+      bundle.clipboard.html.content = placeholder;
+      bundle.clipboard.plain.content = '图片加载失败。请检查图片地址后重试。';
+      bundle.html.content = `<!doctype html><html><body>${placeholder}</body></html>`;
+    }
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(bundle) });
+  });
+  await page.goto(base + '/typesetting');
+
+  const oldErrors = [];
+  for (const [index, outcome] of ['success', 'failure'].entries()) {
+    await page.getByLabel('Markdown 正文').fill(`坏图竞态-${index + 1}`);
+    await page.locator('#preview img').waitFor();
+    await waitForReadyOutput(page);
+    assert.deepEqual((await page.evaluate(() => window.outputSnapshot())).failedImageTargets, [], '新 render 必须清空旧 failed set');
+
+    holdNext = true;
+    const heldCount = held.length;
+    await page.evaluate(() => { void window.requestOutput(); });
+    await waitForCount(held, heldCount + 1);
+    const beforeFailureCalls = calls.length;
+    const immediate = await page.evaluate(() => {
+      const image = document.querySelector('#preview img');
+      window.__task7OldError = window.__imageHandlers.get(image).error;
+      window.__task7OldError();
+      return {
+        fresh: window.hasFreshReadyOutput(),
+        copyDisabled: document.querySelector('#copy-wechat').disabled,
+        htmlDisabled: document.querySelector('#download-html').disabled
+      };
+    });
+    oldErrors.push(await page.evaluateHandle(() => window.__task7OldError));
+    assert.deepEqual(immediate, { fresh: false, copyDisabled: true, htmlDisabled: true }, '首次 error 必须同步关闭 ready gate');
+    await waitForCount(calls, beforeFailureCalls + 1);
+    assert.deepEqual(calls.at(-1).failedImageTargets, [`image-${index + 1}`]);
+    await waitForReadyOutput(page);
+
+    held.at(-1).resolve(outcome);
+    await page.waitForTimeout(60);
+    assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), true, `旧 ${outcome} 不得覆盖坏图新 bundle`);
+    assert.deepEqual((await page.evaluate(() => window.outputSnapshot())).failedImageTargets, [`image-${index + 1}`]);
+    await page.locator('#copy-wechat').click();
+    await page.waitForFunction(count => window.__clipboardItems.length === count, index + 1);
+    const richHtml = await page.evaluate(async itemIndex => window.__clipboardItems[itemIndex].types['text/html'].text(), index);
+    assert.match(richHtml, /图片加载失败/u);
+    assert.doesNotMatch(richHtml, /\ssrc=/iu, '恢复后的坏图 bundle 必须是无 src 占位');
+
+    const callsBeforeOldEvent = calls.length;
+    await oldErrors.at(-1).evaluate(handler => handler());
+    await page.waitForTimeout(40);
+    assert.equal(calls.length, callsBeforeOldEvent, '已替换的旧 DOM 事件不得再次改变 failed set');
+  }
+});
+
+test('真实 server restart 的新 nonce 使非空 target stale 后重新 render 而空 target 正常接受', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installPendingImageSpies });
+  const restarted = await startIsolatedServer(t);
+  const forwarded = [];
+  const heldRestartRenders = [];
+  let holdRestartRender = true;
+  await page.route('https://fixture.invalid/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng }));
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('![重启图片](https://fixture.invalid/restart.png)');
+  await page.locator('#preview img').waitFor();
+  await waitForReadyOutput(page);
+  const oldTarget = await page.locator('#preview img').getAttribute('data-format-target');
+  const oldError = await page.evaluateHandle(() => window.__imageHandlers.get(document.querySelector('#preview img')).error);
+
+  const forwardToRestartedServer = async route => {
+    const request = route.request();
+    const endpoint = new URL(request.url()).pathname;
+    const requestBody = request.postData();
+    if (endpoint.endsWith('/render') && holdRestartRender) {
+      await new Promise(resolve => heldRestartRenders.push(resolve));
+      holdRestartRender = false;
+    }
+    const response = await fetch(restarted.base + endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Origin: restarted.base },
+      body: requestBody
+    });
+    const body = await response.text();
+    forwarded.push({ endpoint, request: JSON.parse(requestBody), status: response.status, body });
+    await route.fulfill({ status: response.status, contentType: 'application/json', body });
+  };
+  await page.route('**/api/typesetting/render', forwardToRestartedServer);
+  await page.route('**/api/typesetting/output', forwardToRestartedServer);
+
+  await oldError.evaluate(handler => handler());
+  await waitForCount(heldRestartRenders, 1);
+  assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), false, 'target-invalid 后 render/output gate 必须同时 stale');
+  assert.equal(await page.locator('#render-status').getAttribute('data-state'), 'checking');
+  assert.deepEqual((await page.evaluate(() => window.outputSnapshot())).failedImageTargets, [oldTarget], '重新 render 前不得静默删除旧 target');
+  assert.equal(forwarded.filter(entry => entry.endpoint.endsWith('/output')).length, 1, '重新 render 前不得清空 target 后静默重试 output');
+  heldRestartRenders[0]();
+  try {
+    await page.waitForFunction(() => document.querySelector('#render-status')?.dataset.state === 'current'
+      && window.hasFreshReadyOutput() && document.querySelector('#preview img'));
+  } catch (error) {
+    const state = await page.evaluate(() => ({
+      renderState: document.querySelector('#render-status')?.dataset.state,
+      renderBlocked: document.querySelector('#render-status')?.dataset.blocked,
+      ready: window.hasFreshReadyOutput(),
+      snapshot: window.outputSnapshot(),
+      outputError: document.querySelector('#output-error')?.textContent
+    }));
+    assert.fail(`${error.message}\nforwarded=${JSON.stringify(forwarded)}\nstate=${JSON.stringify(state)}`);
+  }
+  const invalid = forwarded.find(entry => entry.endpoint.endsWith('/output') && entry.status === 400);
+  assert.ok(invalid, '旧 nonce 的非空 failed target 必须由真实新服务拒绝');
+  assert.deepEqual(invalid.request.failedImageTargets, [oldTarget]);
+  assert.equal(JSON.parse(invalid.body).error.code, 'OUTPUT_FAILED_IMAGE_TARGET_INVALID');
+  const renderAfterInvalid = forwarded.findIndex(entry => entry.endpoint.endsWith('/render'));
+  const invalidIndex = forwarded.indexOf(invalid);
+  assert.equal(renderAfterInvalid > invalidIndex, true, 'typed target error 后必须重新请求 render');
+  assert.equal(forwarded.slice(invalidIndex + 1, renderAfterInvalid).some(entry => entry.endpoint.endsWith('/output')), false, '新 render 前不得静默重试 output');
+
+  const newTarget = await page.locator('#preview img').getAttribute('data-format-target');
+  assert.notEqual(newTarget, oldTarget, '新服务必须产生不同 target nonce');
+  const acceptedEmpty = forwarded.find((entry, index) => index > renderAfterInvalid
+    && entry.endpoint.endsWith('/output') && entry.status === 200 && entry.request.failedImageTargets.length === 0);
+  assert.ok(acceptedEmpty, '新 render 后空 failed target 必须跨 restart 正常接受');
+  assert.doesNotMatch(acceptedEmpty.body, /format-target-/u, '空 target 响应不得泄漏新 nonce');
+  assert.deepEqual((await page.evaluate(() => window.outputSnapshot())).failedImageTargets, [], '新 render 应清空旧 failed set');
+
+  const forwardedBeforeOldEvent = forwarded.length;
+  await oldError.evaluate(handler => handler());
+  await page.waitForTimeout(50);
+  assert.equal(forwarded.length, forwardedBeforeOldEvent, '旧 DOM error 在新 render 后必须无效');
+
+  await page.evaluate(() => window.__imageHandlers.get(document.querySelector('#preview img')).error());
+  await page.waitForFunction(target => window.outputSnapshot().failedImageTargets[0] === target && window.hasFreshReadyOutput(), newTarget);
+  const rebuilt = forwarded.find(entry => entry.endpoint.endsWith('/output') && entry.status === 200
+    && entry.request.failedImageTargets[0] === newTarget);
+  assert.ok(rebuilt, '新 DOM error 必须用新 nonce 重建 failed set');
+  assert.match(rebuilt.body, /图片加载失败/u);
+  assert.doesNotMatch(JSON.parse(rebuilt.body).clipboard.html.content, /\ssrc=/iu);
+});
+
+test('blocker conversion advisory 静态占位门禁只禁止 blocker 且始终保留当前 Markdown', async t => {
+  const { page, base } = await withBrowser(t);
+  const calls = [];
+  await installRenderRoute(page, request => {
+    if (request.body === '触发 RENDER_FAILED') return {
+      html: '',
+      presentation: { theme: request.theme, settings: request.settings },
+      diagnostics: [{
+        id: 'render-failed',
+        code: 'RENDER_FAILED',
+        severity: 'blocker',
+        message: '正文渲染失败。',
+        targets: [{ kind: 'source', start: 0, end: request.body.length }]
+      }],
+      blocked: true
+    };
+    if (request.body === '转换内容') return {
+      html: '<p>转换内容</p>',
+      presentation: { theme: request.theme, settings: request.settings },
+      diagnostics: [{
+        id: 'conversion',
+        code: 'UNSAFE_RICH_TEXT_REMOVED',
+        severity: 'conversion',
+        message: '已移除不安全内容。',
+        targets: [{ kind: 'source', start: 0, end: request.body.length }],
+        meta: { types: ['script'] }
+      }],
+      blocked: false
+    };
+    if (request.body === '静态占位') return {
+      html: '<figure class="format-image-placeholder" data-format-target="static-image" tabindex="0" role="note"><figcaption>图片缺少来源。请补充 HTTPS 地址。</figcaption></figure>',
+      presentation: { theme: request.theme, settings: request.settings },
+      diagnostics: [{
+        id: 'advisory',
+        code: 'IMAGE_MISSING_SOURCE',
+        severity: 'advisory',
+        message: '图片缺少来源。',
+        targets: [{ kind: 'preview', id: 'static-image' }]
+      }],
+      blocked: false
+    };
+    return renderResult(request);
+  });
+  await installOutputRoute(page, calls, (route, request) => {
+    const blocked = request.document.body === '' || request.document.body === '触发 RENDER_FAILED';
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request, { status: blocked ? 'blocked' : 'ready', marker: request.document.body || 'EMPTY_BODY' })) });
+  });
+  await page.goto(base + '/typesetting');
+
+  for (const entry of [
+    { body: '', blocked: true, label: 'EMPTY_BODY' },
+    { body: '触发 RENDER_FAILED', blocked: true, label: 'RENDER_FAILED' },
+    { body: '转换内容', blocked: false, label: 'conversion' },
+    { body: '静态占位', blocked: false, label: 'advisory/static placeholder' }
+  ]) {
+    if (await page.getByLabel('Markdown 正文').inputValue() !== entry.body) await page.getByLabel('Markdown 正文').fill(entry.body);
+    await page.waitForFunction(() => window.hasFreshOutput());
+    assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), !entry.blocked, entry.label);
+    assert.equal(await page.locator('#copy-wechat').isDisabled(), entry.blocked, entry.label);
+    assert.equal(await page.locator('#download-html').isDisabled(), entry.blocked, entry.label);
+    assert.equal(await page.locator('#copy-markdown').isEnabled(), true, entry.label);
+    assert.equal(await page.locator('#download-markdown').isEnabled(), true, entry.label);
+    const artifact = await currentMarkdownArtifact(page);
+    assert.equal(artifact.content, `SERVER:${entry.body || 'EMPTY_BODY'}`, `${entry.label} 必须保留当前 Markdown`);
+  }
 });
 
 test('输出区保留现有 label 并提供四个元信息复制按钮和四个输出动作', async t => {
@@ -610,7 +1012,7 @@ test('HTML gate disabled pending blocker stale error 且 Markdown 下载始终�
   assert.equal(await page.locator('#download-markdown').isEnabled(), true);
 });
 
-test('富文本双 MIME 仅在 write resolve 后成功且失败无 fallback', async t => {
+test('clipboard 降级在非 secure 无 ClipboardItem supports false 与 write reject 时无 rich fallback', async t => {
   const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
   await installRenderRoute(page);
   await installOutputRoute(page, []);
@@ -665,11 +1067,20 @@ test('富文本双 MIME 仅在 write resolve 后成功且失败无 fallback', as
     exec: window.__execCommandCalls
   })), { items: beforeUnsupported.items + 1, writes: beforeUnsupported.writes + 1, writeText: 0, exec: 0 }, 'write 同步抛错也不得 fallback');
 
+  const beforeMissingItem = await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length }));
+  await page.evaluate(() => { window.ClipboardItem = undefined; window.__clipboardMode = 'resolve'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
+  assert.deepEqual(await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length })), beforeMissingItem, '无 ClipboardItem 不得构造 item 或写入');
+  assert.equal(await page.locator('#download-html').isEnabled(), true, '无 ClipboardItem 仍须保留 HTML 下载');
+
   const beforeInsecure = await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length }));
-  await page.evaluate(() => { window.__secureContext = false; });
+  await page.evaluate(() => { window.ClipboardItem = window.__TestClipboardItem; window.__secureContext = false; });
   await page.locator('#copy-wechat').click();
   await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
   assert.deepEqual(await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length })), beforeInsecure, '非安全上下文不得构造 item 或写入');
+  assert.deepEqual(await page.evaluate(() => ({ writeText: window.__writeTextCalls.length, exec: window.__execCommandCalls })), { writeText: 0, exec: 0 });
+  assert.equal(await page.locator('#download-html').isEnabled(), true, '非安全上下文仍须保留 HTML 下载');
 });
 
 test('元信息复制按点击时原值各调用一次 writeText', async t => {
@@ -793,7 +1204,7 @@ test('rich pending 后编辑使动作失效且 resolve 不产生幽灵提示', a
   assert.doesNotMatch(await page.locator('#output-error').textContent(), /未能复制富文本/u);
 });
 
-test('两次 rich 乱序 settle 只允许最新动作提示且 write 严格接收构造 item', async t => {
+test('快速重复 rich action token 只允许已 resolve 的最新 write 报成功', async t => {
   const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
   await installRenderRoute(page);
   await installOutputRoute(page, []);
@@ -824,10 +1235,11 @@ test('两次 rich 乱序 settle 只允许最新动作提示且 write 严格接�
     firstTypes: ['text/html', 'text/plain'],
     secondTypes: ['text/html', 'text/plain']
   });
+  await page.evaluate(() => window.__pendingClipboardWrites[0].resolve());
+  await page.waitForTimeout(40);
+  assert.notEqual(await page.locator('#output-status').textContent(), '已复制正文富文本', '旧 write resolve 时最新动作仍 pending，不能报成功');
   await page.evaluate(() => window.__pendingClipboardWrites[1].resolve());
   await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制正文富文本');
-  await page.evaluate(() => window.__pendingClipboardWrites[0].reject(new Error('old reject')));
-  await page.waitForTimeout(40);
   assert.equal(await page.locator('#output-status').textContent(), '已复制正文富文本');
   assert.equal(await page.locator('#output-error').textContent(), '');
 });

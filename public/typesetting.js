@@ -201,7 +201,26 @@ async function requestOutput() {
       body: JSON.stringify(snapshot)
     });
     if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
-    if (!response.ok) { outputPending = false; syncOutputControls('failure'); return; }
+    if (!response.ok) {
+      let errorPayload;
+      try { errorPayload = await response.json(); } catch { /* Treat malformed error responses as ordinary output failures. */ }
+      if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+      outputPending = false;
+      const failedTargetInvalid = response.status === 400
+        && hasExactKeys(errorPayload, ['error'])
+        && hasExactKeys(errorPayload.error, ['code', 'message', 'retryable'])
+        && errorPayload.error.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID'
+        && typeof errorPayload.error.message === 'string'
+        && errorPayload.error.retryable === false;
+      if (failedTargetInvalid) {
+        syncOutputControls();
+        markRenderStale();
+        schedulePreview();
+        return;
+      }
+      syncOutputControls('failure');
+      return;
+    }
     const bundle = await response.json();
     if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
     if (!isValidOutputBundle(bundle, snapshot) || (bundle.status === 'blocked') !== renderBlocked) {
