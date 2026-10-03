@@ -77,17 +77,25 @@ function normalizeImageAlt(value) {
   return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
 }
 
+function escapeMarkdown(value) {
+  return value.replace(/([\\`*_[\]{}()#+.!|<>&~-])/g, '\\$1');
+}
+
+function decodeImageAltMarkdown(value) {
+  return value.replace(/\\([\\`*_[\]{}()#+.!|<>&~-])/g, '$1');
+}
+
 function classifyImageSource(value) {
   const source = typeof value === 'string' ? value.trim() : '';
   if (!source) return { reason: 'missing-source' };
-  if (/^(?:data|blob):/i.test(source)) return { reason: 'local-binary' };
-  if (/^file:/i.test(source) || /^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
+  if (/^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
   if (/^\/\//.test(source)) return { reason: 'unsupported-scheme' };
   try {
     const url = new URL(source);
-    return url.protocol === 'https:' && !url.username && !url.password
-      ? { url: url.href }
-      : { reason: 'unsupported-scheme' };
+    if (url.protocol === 'data:' || url.protocol === 'blob:') return { reason: 'local-binary' };
+    if (url.protocol === 'file:') return { reason: 'local-path' };
+    if (url.protocol === 'https:' && !url.username && !url.password) return { url: url.href };
+    return { reason: 'unsupported-scheme' };
   } catch {
     return { reason: 'local-path' };
   }
@@ -156,18 +164,17 @@ function parseSpecialContent(token) {
 
 function parseCanonicalImagePlaceholder(token) {
   if (token.tokens.length !== 1 || token.tokens[0].type !== 'paragraph') return null;
-  const inlineTokens = token.tokens[0].tokens;
-  if (!Array.isArray(inlineTokens) || inlineTokens.some(item => item.type !== 'text' && item.type !== 'escape')) return null;
-  const text = inlineTokens.map(item => item.text).join('');
-  if (text.includes('\n') || text.includes('\r')) return null;
+  const text = token.tokens[0].text;
+  if (typeof text !== 'string' || text.includes('\n') || text.includes('\r')) return null;
 
   for (const [reason, message] of Object.entries(imagePlaceholderMessages)) {
     const fixed = `[图片占位：${reason}] ${message}`;
     if (text === fixed) return { reason, alt: '' };
     const prefix = `${fixed} 替代文本：`;
     if (!text.startsWith(prefix)) continue;
-    const alt = text.slice(prefix.length);
-    if (alt && normalizeImageAlt(alt) === alt) return { reason, alt };
+    const rawAlt = text.slice(prefix.length);
+    const alt = normalizeImageAlt(decodeImageAltMarkdown(rawAlt));
+    if (alt && escapeMarkdown(alt) === rawAlt) return { reason, alt };
   }
   return null;
 }

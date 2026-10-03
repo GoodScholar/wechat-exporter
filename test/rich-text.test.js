@@ -94,6 +94,23 @@ test('富文本图片按 HTTPS 本地二进制本地路径不支持协议和缺�
   ]) assert.match(result.markdown, new RegExp(text));
 });
 
+test('富文本图片协议由 URL parser 规范化 ASCII 制表和换行后分类', () => {
+  const result = convertRichText([
+    '<img src="da\tta:image/png;base64,CONTROL_DATA" alt="data">',
+    '<img src="bl\nob:https://example.test/CONTROL_BLOB" alt="blob">',
+    '<img src="fi\tle:///private/CONTROL_FILE.png" alt="file">'
+  ].join(''));
+
+  assert.deepEqual(result.downgraded, [
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'local-path' }
+  ]);
+  assert.equal(result.markdown.match(/\[图片占位：local-binary\]/g)?.length, 2);
+  assert.equal(result.markdown.match(/\[图片占位：local-path\]/g)?.length, 1);
+  assert.doesNotMatch(JSON.stringify(result), /CONTROL_|example\.test|\/private\//);
+});
+
 test('富文本图片占位保留安全截断 alt 但不泄漏来源', () => {
   const longAlt = '🙂'.repeat(205) + 'ALT_TAIL_MUST_NOT_APPEAR';
   const result = convertRichText([

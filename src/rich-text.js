@@ -119,12 +119,14 @@ function parseCanonicalImagePlaceholder(node) {
 function classifyImageSource(value) {
   const source = typeof value === 'string' ? value.trim() : '';
   if (!source) return { reason: 'missing-source' };
-  if (/^(?:data|blob):/i.test(source)) return { reason: 'local-binary' };
-  if (/^file:/i.test(source) || /^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
+  if (/^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
   if (/^\/\//.test(source)) return { reason: 'unsupported-scheme' };
   try {
     const url = new URL(source);
-    return url.protocol === 'https:' && !url.username && !url.password ? { url: url.href } : { reason: 'unsupported-scheme' };
+    if (url.protocol === 'data:' || url.protocol === 'blob:') return { reason: 'local-binary' };
+    if (url.protocol === 'file:') return { reason: 'local-path' };
+    if (url.protocol === 'https:' && !url.username && !url.password) return { url: url.href };
+    return { reason: 'unsupported-scheme' };
   } catch {
     return { reason: 'local-path' };
   }

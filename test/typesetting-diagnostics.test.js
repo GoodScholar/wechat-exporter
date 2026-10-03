@@ -2,6 +2,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { convertRichText } from '../src/rich-text.js';
 import { createTypesettingRenderer, renderTypesettingMarkdown } from '../src/typesetting-render.js';
 
 const presentation = {
@@ -441,6 +442,10 @@ test('规范富文本图片占位刷新后重建唯一 advisory', () => {
     '正文中的 [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 只是文字。',
     '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。\n> 额外文本',
     '> [图片占位：local-binary] 不完整文案',
+    '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：',
+    '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：[点击](https://attacker.test)',
+    '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：![图片](https://attacker.test/image.png)',
+    '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：<em>伪造</em>',
     '> > [图片占位：missing-source] 图片缺少来源。请补充 HTTPS 地址。'
   ].join('\n\n')));
 
@@ -452,6 +457,39 @@ test('规范富文本图片占位刷新后重建唯一 advisory', () => {
   ]);
   assert.equal(result.html.match(/format-image-placeholder/g)?.length, 4);
   assert.match(result.html, /替代文本：安全\*图片\*/);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
+});
+
+test('富文本图片 URL 和 email alt 往返后两种脚注状态都只重建图片 advisory', () => {
+  const converted = convertRichText('<img src="data:image/png;base64,ROUNDTRIP_SECRET" alt="URL https://example.test/path 与邮箱 reader@example.test">');
+  assert.match(converted.markdown, /https:\/\/example\\\.test\/path/);
+  assert.match(converted.markdown, /reader@example\\\.test/);
+
+  for (const footnotes of [false, true]) {
+    const result = renderTypesettingMarkdown(input(converted.markdown, footnotes));
+    assert.deepEqual(imageDiagnostics(result).map(item => item.code), ['IMAGE_LOCAL_BINARY']);
+    assert.equal(conversionDiagnostics(result, 'EXTERNAL_LINK_TO_FOOTNOTE').length, 0);
+    assert.equal(result.html.match(/format-image-placeholder/g)?.length, 1);
+    assert.match(result.html, /替代文本：URL https:\/\/example\.test\/path 与邮箱 reader@example\.test/);
+    assert.doesNotMatch(result.html + JSON.stringify(result.diagnostics), /ROUNDTRIP_SECRET/);
+    assertStaticImageDiagnosticsAreStrictAndPresent(result);
+  }
+});
+
+test('raw HTML 图片协议由 URL parser 规范化 ASCII 制表和换行后分类', () => {
+  const result = renderTypesettingMarkdown(input([
+    '<img src="da\tta:image/png;base64,CONTROL_DATA" alt="data">',
+    '<img src="bl\nob:https://example.test/CONTROL_BLOB" alt="blob">',
+    '<img src="fi\tle:///private/CONTROL_FILE.png" alt="file">'
+  ].join('\n\n')));
+
+  assert.deepEqual(imageDiagnostics(result).map(item => item.code), [
+    'IMAGE_LOCAL_BINARY',
+    'IMAGE_LOCAL_BINARY',
+    'IMAGE_LOCAL_PATH'
+  ]);
+  assert.equal(result.html.match(/format-image-placeholder/g)?.length, 3);
+  assert.doesNotMatch(result.html + JSON.stringify(result.diagnostics), /CONTROL_|example\.test|\/private\//);
   assertStaticImageDiagnosticsAreStrictAndPresent(result);
 });
 
