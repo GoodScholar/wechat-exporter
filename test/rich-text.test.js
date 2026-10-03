@@ -46,6 +46,88 @@ test('富文本转换移除可执行内容和不安全 URL，但保留可读文�
   assert.ok(result.removed.includes('form'));
 });
 
+test('富文本图片按 HTTPS 本地二进制本地路径不支持协议和缺失来源分类', () => {
+  const sources = [
+    ['https://example.test/publishable.png', 'HTTPS'],
+    ['https://user:secret@example.test/credential.png', '凭据 HTTPS'],
+    ['http://example.test/insecure.png', 'HTTP'],
+    ['//example.test/protocol-relative.png', '协议相对'],
+    ['file:///tmp/local-file.png', 'file'],
+    ['/tmp/unix-path.png', 'Unix'],
+    [String.raw`C:\private\windows-path.png`, 'Windows'],
+    ['./relative-path.png', '相对'],
+    ['~/home-path.png', '家目录'],
+    ['data:image/png;base64,LOCAL_BINARY_DATA', 'data'],
+    ['blob:https://example.test/LOCAL_BINARY_BLOB', 'blob'],
+    ['   ', '空来源']
+  ];
+  const html = sources.map(([src, alt]) => `<img src="${src}" alt="${alt}">`).join('') + '<img alt="缺失来源">';
+
+  const result = convertRichText(html);
+
+  assert.match(result.markdown, /!\[HTTPS\]\(https:\/\/example\.test\/publishable\.png\)/);
+  assert.deepEqual(result.downgraded, [
+    { type: 'image', reason: 'unsupported-scheme' },
+    { type: 'image', reason: 'unsupported-scheme' },
+    { type: 'image', reason: 'unsupported-scheme' },
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'missing-source' },
+    { type: 'image', reason: 'missing-source' }
+  ]);
+  assert.equal(result.markdown.match(/\[\u56fe\u7247\u5360\u4f4d：local-binary\]/g)?.length, 2);
+  assert.equal(result.markdown.match(/\[\u56fe\u7247\u5360\u4f4d：local-path\]/g)?.length, 5);
+  assert.equal(result.markdown.match(/\[\u56fe\u7247\u5360\u4f4d：unsupported-scheme\]/g)?.length, 3);
+  assert.equal(result.markdown.match(/\[\u56fe\u7247\u5360\u4f4d：missing-source\]/g)?.length, 2);
+  assert.match(result.markdown, /^> \[图片占位：local-binary\] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。/m);
+  assert.doesNotMatch(result.markdown, /^> \\\[图片占位：/m);
+  for (const text of [
+    '本地图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+    '本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+    '图片协议不受支持。请替换为 HTTPS 地址。',
+    '图片缺少来源。请补充 HTTPS 地址。'
+  ]) assert.match(result.markdown, new RegExp(text));
+});
+
+test('富文本图片占位保留安全截断 alt 但不泄漏来源', () => {
+  const longAlt = '🙂'.repeat(205) + 'ALT_TAIL_MUST_NOT_APPEAR';
+  const result = convertRichText([
+    '<img src="file:///private/SECRET_FILE.png" alt="  第一行\n\t *强调* [链接]  第二行  ">',
+    `<img src="data:image/png;base64,SECRET_DATA" alt="${longAlt}">`,
+    '<img src="blob:https://example.test/SECRET_BLOB" alt="blob alt">',
+    '<img src="https://user:SECRET_PASSWORD@example.test/private.png" alt="credential alt">',
+    '<img src="http://example.test/SECRET_HTTP.png" alt="http alt">'
+  ].join(''));
+
+  assert.match(result.markdown, /替代文本：第一行 \\\*强调\\\* \\\[链接\\\] 第二行/);
+  assert.match(result.markdown, new RegExp(`替代文本：${'🙂'.repeat(200)}(?!🙂)`));
+  assert.doesNotMatch(result.markdown, /ALT_TAIL_MUST_NOT_APPEAR/);
+  assert.deepEqual(result.downgraded, [
+    { type: 'image', reason: 'local-path' },
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'local-binary' },
+    { type: 'image', reason: 'unsupported-scheme' },
+    { type: 'image', reason: 'unsupported-scheme' }
+  ]);
+  assert.doesNotMatch(JSON.stringify(result), /SECRET_FILE|SECRET_DATA|SECRET_BLOB|SECRET_PASSWORD|SECRET_HTTP/);
+});
+
+test('富文本 removed 固定去重排序且现有特殊媒体结构保持严格', () => {
+  const result = convertRichText('<a href="javascript:first()">安全文字</a><p onclick="first()" onmouseover="second()" style="color:red">正文</p><form><input></form><style>p{color:red}</style><script>first()</script><link rel="stylesheet" href="javascript:second()"><div data-type="video"><img src="data:image/png;base64,MEDIA_SECRET"><video src="https://example.test/movie.mp4"></video><img src="file:///private/MEDIA_PATH.png"></div>');
+
+  assert.deepEqual(result.removed, ['script', 'style', 'form', 'event-handler', 'unsafe-url']);
+  assert.deepEqual(result.downgraded, [{ type: 'video', sourceUrl: 'https://example.test/movie.mp4' }]);
+  assert.equal(result.downgraded.filter(item => item.type === 'image').length, 0);
+  assert.equal(result.markdown.match(/^> \\\[特殊内容：视频\\\] 来源：https:\/\/example\.test\/movie\.mp4$/gm)?.length, 1);
+  assert.doesNotMatch(result.markdown, /\[图片占位：/);
+  assert.doesNotMatch(JSON.stringify(result), /MEDIA_SECRET|MEDIA_PATH/);
+});
+
 test('富文本转换把所有特殊媒体降级为带安全来源的静态占位块', () => {
   const result = convertRichText('<video src="https://example.test/video.mp4"></video><audio src="https://example.test/audio.mp3"></audio><iframe src="https://example.test/embed"></iframe><mp-miniprogram data-miniprogram-appid="wx123" data-path="/pages/home"></mp-miniprogram><div class="vote_area">投票</div><video src="javascript:alert(1)"></video>');
   assert.deepEqual(result.downgraded.map(item => item.type), ['video', 'audio', 'embed', 'mini-program', 'poll', 'video']);
