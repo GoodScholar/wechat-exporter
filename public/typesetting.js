@@ -44,6 +44,14 @@ let previewVersion = 0;
 let appliedRenderVersion = 0;
 let renderFresh = false;
 let renderBlocked = false;
+let appliedPresentation;
+let outputVersion = 0;
+let outputRequestVersion = 0;
+let outputFresh = false;
+let outputPending = false;
+let outputBundle;
+let outputCache;
+const failedImageTargets = new Set();
 let staticDiagnostics = [];
 let dynamicImageDiagnostics = [];
 let dynamicImageDiagnosticSequence = 0;
@@ -74,6 +82,147 @@ function isValidPresentation(presentation) {
   return hasExactKeys(presentation, ['theme', 'settings']) && isKnownOption(themeControls.theme, presentation.theme)
     && hasExactKeys(presentation.settings, themeSettingNames)
     && themeSettingNames.every(name => isKnownOption(themeControls[name], presentation.settings[name]));
+}
+function sameExactValue(left, right) {
+  if (Object.is(left, right)) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left) && Array.isArray(right) && left.length === right.length
+      && left.every((value, index) => sameExactValue(value, right[index]));
+  }
+  if (typeof left !== 'object' || left === null || typeof right !== 'object' || right === null) return false;
+  const leftKeys = Object.keys(left);
+  const rightKeys = Object.keys(right);
+  return leftKeys.length === rightKeys.length && leftKeys.every(key => Object.hasOwn(right, key) && sameExactValue(left[key], right[key]));
+}
+function sameOutputSnapshot(left, right) { return sameExactValue(left, right); }
+function isValidOutputSnapshot(snapshot) {
+  return hasExactKeys(snapshot, ['document', 'presentation', 'convertExternalLinksToFootnotes', 'failedImageTargets'])
+    && hasExactKeys(snapshot.document, ['title', 'author', 'account', 'publishedAt', 'body'])
+    && Object.values(snapshot.document).every(value => typeof value === 'string')
+    && isValidPresentation(snapshot.presentation)
+    && typeof snapshot.convertExternalLinksToFootnotes === 'boolean'
+    && Array.isArray(snapshot.failedImageTargets)
+    && snapshot.failedImageTargets.every(isNonEmptyString)
+    && new Set(snapshot.failedImageTargets).size === snapshot.failedImageTargets.length;
+}
+function isValidOutputArtifact(artifact, mimeType, filename = false) {
+  const keys = filename ? ['mimeType', 'filename', 'content'] : ['mimeType', 'content'];
+  return hasExactKeys(artifact, keys) && artifact.mimeType === mimeType
+    && (!filename || isNonEmptyString(artifact.filename)) && typeof artifact.content === 'string';
+}
+function isValidOutputBundle(value, snapshot) {
+  if (!hasExactKeys(value, ['schemaVersion', 'status', 'snapshot', 'markdown', 'clipboard', 'html'])
+    || value.schemaVersion !== 1 || !['ready', 'blocked'].includes(value.status)
+    || !isValidOutputSnapshot(value.snapshot) || !sameOutputSnapshot(value.snapshot, snapshot)
+    || !isValidOutputArtifact(value.markdown, 'text/markdown;charset=utf-8', true)) return false;
+  if (value.status === 'blocked') return value.clipboard === null && value.html === null;
+  return hasExactKeys(value.clipboard, ['html', 'plain'])
+    && isValidOutputArtifact(value.clipboard.html, 'text/html')
+    && isValidOutputArtifact(value.clipboard.plain, 'text/plain')
+    && isValidOutputArtifact(value.html, 'text/html;charset=utf-8', true);
+}
+function normalizeOutputString(value) { return value.replace(/\r\n?/gu, '\n'); }
+function safeOutputBaseName(title) {
+  let basename = normalizeOutputString(title).trim().replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '_');
+  basename = basename.replace(/^\.+/u, '').replace(/[. ]+$/u, '');
+  basename = [...basename].slice(0, 80).join('').replace(/[. ]+$/u, '');
+  return basename || '未命名文章';
+}
+function buildNormalizedMarkdown(document) {
+  const normalized = Object.fromEntries(Object.entries(document).map(([key, value]) => [key, normalizeOutputString(value)]));
+  const body = normalized.body.replace(/\n+$/u, '');
+  return [
+    '---',
+    `title: ${JSON.stringify(normalized.title)}`,
+    `author: ${JSON.stringify(normalized.author)}`,
+    `account: ${JSON.stringify(normalized.account)}`,
+    `publishedAt: ${JSON.stringify(normalized.publishedAt)}`,
+    '---',
+    '',
+    `${body}\n`
+  ].join('\n');
+}
+function currentOutputDocument() {
+  return Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value]));
+}
+function outputSnapshot() {
+  const orderedTargets = [...$('#preview').querySelectorAll('[data-format-target]')]
+    .map(node => node.getAttribute('data-format-target'))
+    .filter(target => failedImageTargets.has(target));
+  return {
+    document: currentOutputDocument(),
+    presentation: appliedPresentation && {
+      theme: appliedPresentation.theme,
+      settings: { ...appliedPresentation.settings }
+    },
+    convertExternalLinksToFootnotes: convertExternalLinks.checked,
+    failedImageTargets: orderedTargets
+  };
+}
+function invalidateOutput() {
+  outputVersion++;
+  outputFresh = false;
+  outputPending = false;
+  outputBundle = undefined;
+  outputCache = undefined;
+}
+function isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot) {
+  return requestVersion === outputRequestVersion && version === outputVersion
+    && renderVersion === appliedRenderVersion && renderVersion === previewVersion
+    && renderFresh && sameOutputSnapshot(outputSnapshot(), snapshot);
+}
+async function requestOutput() {
+  if (!renderFresh || appliedRenderVersion !== previewVersion || !appliedPresentation) return;
+  outputFresh = false;
+  outputPending = true;
+  outputBundle = undefined;
+  outputCache = undefined;
+  const requestVersion = ++outputRequestVersion;
+  const version = outputVersion;
+  const renderVersion = appliedRenderVersion;
+  const snapshot = outputSnapshot();
+  try {
+    const response = await fetch('/api/typesetting/output', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(snapshot)
+    });
+    if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+    if (!response.ok) { outputPending = false; return; }
+    const bundle = await response.json();
+    if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
+    if (!isValidOutputBundle(bundle, snapshot) || (bundle.status === 'blocked') !== renderBlocked) {
+      outputPending = false;
+      return;
+    }
+    outputBundle = bundle;
+    outputCache = { outputVersion: version, renderVersion, snapshot, bundle };
+    outputFresh = true;
+    outputPending = false;
+  } catch {
+    if (isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) outputPending = false;
+  }
+}
+function hasFreshOutput() {
+  if (!renderFresh || !outputFresh || outputPending || !outputBundle || !outputCache) return false;
+  const snapshot = outputSnapshot();
+  return outputCache.outputVersion === outputVersion
+    && outputCache.renderVersion === appliedRenderVersion
+    && appliedRenderVersion === previewVersion
+    && outputCache.bundle === outputBundle
+    && sameOutputSnapshot(outputCache.snapshot, snapshot)
+    && sameOutputSnapshot(outputBundle.snapshot, snapshot)
+    && (outputBundle.status === 'blocked') === renderBlocked;
+}
+function hasFreshReadyOutput() { return hasFreshOutput() && !renderBlocked && outputBundle.status === 'ready'; }
+function currentMarkdownArtifact() {
+  if (hasFreshOutput()) return outputBundle.markdown;
+  const document = currentOutputDocument();
+  return {
+    mimeType: 'text/markdown;charset=utf-8',
+    filename: `${safeOutputBaseName(document.title)}.md`,
+    content: buildNormalizedMarkdown(document)
+  };
 }
 function isNonEmptyString(value) { return typeof value === 'string' && value.length > 0; }
 function isPositiveInteger(value) { return Number.isSafeInteger(value) && value > 0; }
@@ -406,6 +555,11 @@ function settleImage(img, previewRoot, version, failed = false) {
 
   const target = img.getAttribute('data-format-target');
   const alt = normalizeRuntimeImageAlt(img.alt);
+  const firstFailure = !failedImageTargets.has(target);
+  if (firstFailure) {
+    failedImageTargets.add(target);
+    invalidateOutput();
+  }
   removePendingImageHandlers(img);
   const placeholder = document.createElement('figure');
   placeholder.className = 'format-image-placeholder';
@@ -425,6 +579,7 @@ function settleImage(img, previewRoot, version, failed = false) {
     targets: [{ kind: 'preview', id: target }]
   });
   renderDiagnosticGroups(version);
+  if (firstFailure) void requestOutput();
 }
 function attachPendingImageHandlers(previewRoot, version) {
   for (const img of previewRoot.querySelectorAll('img[data-image-state="pending"]')) {
@@ -440,6 +595,8 @@ function attachPendingImageHandlers(previewRoot, version) {
   }
 }
 function applyRenderResult(rendered, detachedPreview, version) {
+  invalidateOutput();
+  failedImageTargets.clear();
   const currentPreview = $('#preview');
   const nextPreview = currentPreview.cloneNode(false);
   nextPreview.replaceChildren(...detachedPreview.childNodes);
@@ -447,11 +604,13 @@ function applyRenderResult(rendered, detachedPreview, version) {
   staticDiagnostics = rendered.diagnostics;
   dynamicImageDiagnostics = [];
   renderBlocked = rendered.blocked;
+  appliedPresentation = { theme: rendered.presentation.theme, settings: { ...rendered.presentation.settings } };
   appliedRenderVersion = version;
   renderFresh = true;
   currentPreview.replaceWith(nextPreview);
   renderDiagnosticGroups(version);
   syncRenderStatus('current');
+  void requestOutput();
   attachPendingImageHandlers(nextPreview, version);
 }
 async function preview(version, snapshot) {
@@ -515,29 +674,32 @@ async function flushSave() {
   return true;
 }
 function recordDocumentChange() {
+  invalidateOutput();
   saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 }
 for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
-  if (name === 'body') {
-    if (controlledBodyInsertion) return;
-    clearRichTextAudit();
-  }
+  if (name === 'body' && controlledBodyInsertion) return;
   recordDocumentChange();
+  if (name === 'body') clearRichTextAudit();
 });
 convertExternalLinks.addEventListener('change', () => {
+  invalidateOutput();
   documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 themeControls.theme.addEventListener('change', () => {
+  invalidateOutput();
   documentModel.theme = themeControls.theme.value;
   syncThemeControls();
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 for (const name of themeSettingNames) themeControls[name].addEventListener('change', () => {
+  invalidateOutput();
   currentThemeSettings()[name] = themeControls[name].value;
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
 });
 themeControls.reset.addEventListener('click', () => {
+  invalidateOutput();
   documentModel.themeSettings[documentModel.theme] = defaultThemeSettings()[documentModel.theme];
   syncThemeControls();
   saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
@@ -674,6 +836,7 @@ importForm.addEventListener('submit', async event => {
     }
     clearTimeout(saveTimer);
     dirty = false;
+    invalidateOutput();
     hydrateDocument(result.document, true);
     schedulePreview();
     setStatus('已保存');
