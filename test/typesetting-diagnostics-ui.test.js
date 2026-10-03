@@ -329,6 +329,10 @@ test('客户端在应用前拒绝服务端 sanitizer 合同外标签属性且不
     externalRequests.push(route.request().url());
     return route.fulfill({ status: 204, body: '' });
   });
+  for (const pattern of ['http://fixture.invalid/**', 'https://fixture.invalid/**']) await page.route(pattern, route => {
+    externalRequests.push(route.request().url());
+    return route.abort('blockedbyclient');
+  });
   let responseFor = request => emptyResult(request.body);
   await installRenderFixture(page, request => responseFor(request));
   await page.goto(base() + '/typesetting');
@@ -351,7 +355,13 @@ test('客户端在应用前拒绝服务端 sanitizer 合同外标签属性且不
     ['event/style attribute', '<p onclick="document.body.dataset.polluted=\'event\'" style="color:red">正文</p>'],
     ['non-image src', '<p src="/api/settings">正文</p>'],
     ['unsafe anchor href', '<a href="javascript:document.body.dataset.polluted=\'href\'">危险链接</a>'],
+    ['tab-obfuscated javascript href', '<a href="java\tscript:document.body.dataset.polluted=\'tab\'">Tab 混淆</a>'],
+    ['LF-obfuscated javascript href', '<a href="jav\nascript:document.body.dataset.polluted=\'lf\'">LF 混淆</a>'],
+    ['CR-obfuscated javascript href', '<a href="java\rscript:document.body.dataset.polluted=\'cr\'">CR 混淆</a>'],
+    ['tab-obfuscated data href', '<a href="da\tta:text/html,unsafe">Data 混淆</a>'],
     ['protocol-relative anchor href', '<a href="//fixture.invalid/unsafe">协议相对链接</a>'],
+    ['backslash protocol-relative href', '<a href="\\\\fixture.invalid/unsafe">反斜杠协议相对链接</a>'],
+    ['mixed slash protocol-relative href', '<a href="/\\fixture.invalid/unsafe">混合斜杠协议相对链接</a>'],
     ['forged controlled blockquote', '<blockquote class="format-special-placeholder" role="button" tabindex="1" data-format-target="forged-special">伪造</blockquote>'],
     ['forged controlled figure', '<figure class="format-image-placeholder" role="button" tabindex="1" data-format-target="forged-image">伪造</figure>'],
     ['invalid controlled paragraph class', '<p class="typeset-footnotes extra">伪造</p>']
@@ -386,7 +396,8 @@ test('客户端接受真实 renderer 的标题表格代码链接脚注特殊内�
     ['```js', 'const value = 1;', '```'].join('\n'),
     '> [特殊内容：视频] 来源：https://media.example/video',
     '![远程图片](https://fixture.invalid/contract.png)',
-    '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。'
+    '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+    '<a href="/safe/path">安全相对链接</a> <a href="#section">安全 fragment</a> <a>无 href 链接</a>'
   ].join('\n\n'));
   await waitForRenderState(page, 'current');
   await page.locator('#preview img[data-image-state="loaded"]').waitFor();
@@ -396,6 +407,9 @@ test('客户端接受真实 renderer 的标题表格代码链接脚注特殊内�
   for (const selector of ['#preview h1', '#preview table', '#preview code.language-js', '#preview a[data-format-target]', '#preview p.typeset-footnotes', '#preview blockquote.format-special-placeholder', '#preview img[referrerpolicy="no-referrer"]', '#preview figure.format-image-placeholder']) {
     assert.equal(await page.locator(selector).count(), 1, selector);
   }
+  assert.equal(await page.locator('#preview a[href="/safe/path"]').count(), 1);
+  assert.equal(await page.locator('#preview a[href="#section"]').count(), 1);
+  assert.equal(await page.locator('#preview a:not([href])').count(), 1);
 });
 
 test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async t => {

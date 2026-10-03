@@ -96,10 +96,13 @@ function hasAllowedPreviewElement(element) {
   const allowedAttributes = previewAllowedAttributes[tag] || [];
   if ([...element.attributes].some(attribute => !allowedAttributes.includes(attribute.name))) return false;
   if (tag === 'a' && element.hasAttribute('href')) {
-    const href = element.getAttribute('href').trim();
-    if (href.startsWith('//')) return false;
-    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href)?.[1].toLowerCase();
-    if (scheme && !['http', 'https', 'mailto'].includes(scheme)) return false;
+    const rawHref = element.getAttribute('href');
+    if (/[\u0000-\u001f\u007f]/u.test(rawHref)) return false;
+    const href = rawHref.trim();
+    if (/^[\\/]{2}/u.test(href)) return false;
+    try {
+      if (!['http:', 'https:', 'mailto:'].includes(new URL(href, window.location.href).protocol)) return false;
+    } catch { return false; }
   }
   if (tag === 'blockquote') {
     if (!element.hasAttribute('class')) return element.attributes.length === 0;
