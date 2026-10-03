@@ -33,11 +33,16 @@ const blockPlainTextTags = new Set([
   'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'p'
 ]);
 const structuralWhitespaceParents = new Set([
-  'article', 'aside', 'body', 'div', 'footer', 'header', 'hgroup', 'main', 'nav', 'section', 'table', 'tbody', 'tfoot', 'thead', 'tr'
+  'article', 'aside', 'blockquote', 'body', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'header', 'hgroup',
+  'main', 'nav', 'section', 'table', 'tbody', 'tfoot', 'thead', 'tr'
 ]);
-const allowedStyleKeywords = new Set([
-  'auto', 'block', 'table', 'none', 'solid', 'dashed', 'collapse', 'center', 'underline', 'anywhere', 'currentcolor', 'sans-serif'
-]);
+const borderStyleValues = new Set(['none', 'solid', 'dashed']);
+const colorStyleProperties = new Set(['color', 'background', 'background-color']);
+const lengthStyleProperties = new Set(['width', 'max-width', 'height', 'max-height']);
+const marginStyleProperties = new Set(['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left']);
+const paddingStyleProperties = new Set(['padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left']);
+const borderStyleProperties = new Set(['border', 'border-top', 'border-right', 'border-bottom', 'border-left']);
+const cssNumericLimit = 10000;
 const controlledImageTarget = /^format-target-[a-f0-9]{24}-[1-9]\d*$/u;
 const fixedTypesettingThemeCss = readFileSync(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
 const fixedJuiceOptions = Object.freeze({
@@ -342,19 +347,132 @@ function splitStyleDeclarations(style) {
   return declarations;
 }
 
-function hasSafeStyleValue(value) {
-  if (!value || /[\u0000-\u001f\u007f\\{};<>@!]/u.test(value)
+function parseFiniteCssNumber(value, { min = -cssNumericLimit, max = cssNumericLimit } = {}) {
+  if (!/^[+-]?(?:\d+(?:\.\d+)?|\.\d+)$/u.test(value)) return null;
+  const number = Number(value);
+  return Number.isFinite(number) && number >= min && number <= max ? number : null;
+}
+
+function isSafeCalc(value, { allowNegative = false, min = 0, max = cssNumericLimit } = {}) {
+  const match = /^calc\(\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|%)\s*\*\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\)$/iu.exec(value);
+  if (!match) return false;
+  const length = parseFiniteCssNumber(match[1], { min: allowNegative ? -max : min, max });
+  const factor = parseFiniteCssNumber(match[3], { min: 0, max: 10 });
+  return length !== null && factor !== null;
+}
+
+function isSafeLength(value, { allowAuto = false, allowNegative = false, allowCalc = true, min = 0, max = cssNumericLimit } = {}) {
+  if (allowAuto && value.toLowerCase() === 'auto') return true;
+  if (allowCalc && isSafeCalc(value, { allowNegative, min, max })) return true;
+  const match = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|%)?$/iu.exec(value);
+  if (!match) return false;
+  const number = parseFiniteCssNumber(match[1], { min: allowNegative ? -max : min, max });
+  if (number === null) return false;
+  return match[2] !== undefined || number === 0;
+}
+
+function splitCssValueTokens(value) {
+  const tokens = [];
+  let current = '';
+  let quote = '';
+  let depth = 0;
+  for (const character of value) {
+    if (quote) {
+      current += character;
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      current += character;
+    } else if (character === '(') {
+      depth += 1;
+      current += character;
+    } else if (character === ')') {
+      depth -= 1;
+      if (depth < 0) return [];
+      current += character;
+    } else if (/\s/u.test(character) && depth === 0) {
+      if (current) tokens.push(current);
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  if (quote || depth !== 0) return [];
+  if (current) tokens.push(current);
+  return tokens;
+}
+
+function everyCssToken(value, predicate, { min = 1, max = 4 } = {}) {
+  const tokens = splitCssValueTokens(value);
+  return tokens.length >= min && tokens.length <= max && tokens.every(predicate);
+}
+
+function isSafeColor(value) {
+  return /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/iu.test(value) || value.toLowerCase() === 'currentcolor';
+}
+
+function isSafeBorder(value) {
+  if (value === '0') return true;
+  const tokens = splitCssValueTokens(value);
+  if (tokens.length !== 3) return false;
+  return isSafeLength(tokens[0], { max: 100 }) && borderStyleValues.has(tokens[1].toLowerCase()) && isSafeColor(tokens[2]);
+}
+
+function isSafeFont(value) {
+  const match = /^((?:\d+(?:\.\d+)?|\.\d+)px)\/((?:\d+(?:\.\d+)?|\.\d+)) ('PingFang SC'|"PingFang SC"), ('Microsoft YaHei'|"Microsoft YaHei"), sans-serif$/u.exec(value);
+  return Boolean(match)
+    && isSafeLength(match[1], { min: 0.01, max: 256 })
+    && parseFiniteCssNumber(match[2], { min: 0.5, max: 4 }) !== null;
+}
+
+function hasSafeStyleValue(property, value) {
+  if (!value || value.length > 512 || /[\u0000-\u001f\u007f\\{};<>@!]/u.test(value)
     || /(?:url\s*\(|@import|expression|javascript\s*:|data\s*:|blob\s*:|var\s*\(|env\s*\(|attr\s*\(|behavior)/iu.test(value)
     || !/^[\p{L}\p{N}\s#.,'"%+\-*/()]+$/u.test(value)) return false;
-  let remaining = value.replace(/calc\(\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:px|em|rem|%)\s*\*\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\)/giu, ' 0px ');
-  remaining = remaining
-    .replace(/'(?:PingFang SC|Microsoft YaHei)'/gu, ' known-font ')
-    .replace(/"(?:PingFang SC|Microsoft YaHei)"/gu, ' known-font ');
-  if (/[()'"]/u.test(remaining)) return false;
-  const tokens = remaining.split(/[\s,/]+/u).filter(Boolean);
-  return tokens.length > 0 && tokens.every(token => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/iu.test(token)
-    || /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:px|em|rem|%)?$/u.test(token)
-    || token === 'known-font' || allowedStyleKeywords.has(token.toLowerCase()));
+  const lower = value.toLowerCase();
+  if (colorStyleProperties.has(property)) return isSafeColor(value);
+  if (property === 'font') return isSafeFont(value);
+  if (property === 'font-family') {
+    return /^(?:'PingFang SC'|"PingFang SC"), (?:'Microsoft YaHei'|"Microsoft YaHei"), sans-serif$/u.test(value);
+  }
+  if (property === 'font-size') return isSafeLength(value, { min: 0.01, max: 256 });
+  if (property === 'font-weight') {
+    const numeric = parseFiniteCssNumber(value, { min: 1, max: 1000 });
+    return ['normal', 'bold'].includes(lower) || (numeric !== null && Number.isInteger(numeric));
+  }
+  if (property === 'font-style') return ['normal', 'italic', 'oblique'].includes(lower);
+  if (property === 'line-height') {
+    return parseFiniteCssNumber(value, { min: 0.5, max: 10 }) !== null || isSafeLength(value, { min: 0.01, max: 256 });
+  }
+  if (property === 'letter-spacing') return lower === 'normal' || isSafeLength(value, { allowNegative: true, max: 100 });
+  if (property === 'text-align') return ['left', 'right', 'center', 'justify', 'start', 'end'].includes(lower);
+  if (property === 'text-decoration') return ['none', 'underline'].includes(lower);
+  if (property === 'text-underline-offset') return lower === 'auto' || isSafeLength(value, { allowNegative: true, max: 100 });
+  if (property === 'white-space') return ['normal', 'pre', 'pre-wrap', 'pre-line', 'nowrap', 'break-spaces'].includes(lower);
+  if (property === 'overflow-wrap') return ['normal', 'break-word', 'anywhere'].includes(lower);
+  if (property === 'word-break') return ['normal', 'break-all', 'keep-all', 'break-word'].includes(lower);
+  if (property === 'vertical-align') {
+    return ['baseline', 'sub', 'super', 'top', 'text-top', 'middle', 'bottom', 'text-bottom'].includes(lower)
+      || isSafeLength(value, { allowNegative: true, max: 1000 });
+  }
+  if (property === 'display') return ['block', 'table'].includes(lower);
+  if (lengthStyleProperties.has(property)) return isSafeLength(value, { allowAuto: property === 'width' || property === 'height' });
+  if (marginStyleProperties.has(property)) {
+    return everyCssToken(value, token => token.toLowerCase() === 'auto' || isSafeLength(token, { allowNegative: true, max: 1000 }));
+  }
+  if (paddingStyleProperties.has(property)) return everyCssToken(value, token => isSafeLength(token, { max: 1000 }));
+  if (borderStyleProperties.has(property)) return isSafeBorder(value);
+  if (property === 'border-width') return everyCssToken(value, token => isSafeLength(token, { max: 100 }));
+  if (property === 'border-style') return everyCssToken(value, token => borderStyleValues.has(token.toLowerCase()));
+  if (property === 'border-color') return everyCssToken(value, isSafeColor);
+  if (property === 'border-radius') return everyCssToken(value, token => isSafeLength(token, { max: 1000 }));
+  if (property === 'border-collapse') return ['collapse', 'separate'].includes(lower);
+  if (property === 'table-layout') return ['auto', 'fixed'].includes(lower);
+  if (property === 'list-style-type') return ['none', 'disc', 'circle', 'square', 'decimal'].includes(lower);
+  if (property === 'overflow') return lower === 'auto';
+  return false;
 }
 
 function normalizeStyle(style, { removeVariables = false } = {}) {
@@ -366,7 +484,7 @@ function normalizeStyle(style, { removeVariables = false } = {}) {
     const property = declaration.slice(0, separator).trim().toLowerCase();
     const value = declaration.slice(separator + 1).trim();
     if (removeVariables && property.startsWith('--')) continue;
-    if (!allowedStyleProperties.has(property) || seen.has(property) || !hasSafeStyleValue(value)) {
+    if (!allowedStyleProperties.has(property) || seen.has(property) || !hasSafeStyleValue(property, value)) {
       throw outputError('OUTPUT_GENERATION_FAILED');
     }
     seen.add(property);
@@ -595,8 +713,9 @@ function renderTablePlainText($, table, depth) {
 
 function renderPlainTextNode($, node, depth = 0) {
   if (node.type === 'text') {
-    const value = (node.data || '').replace(/[\s\u00a0]+/gu, ' ');
-    if (!value.trim() && structuralWhitespaceParents.has(node.parent?.tagName)) return '';
+    const raw = node.data || '';
+    const value = raw.replace(/[\s\u00a0]+/gu, ' ');
+    if (!value.trim() && /[\r\n]/u.test(raw) && structuralWhitespaceParents.has(node.parent?.tagName)) return '';
     return value;
   }
   if (node.type !== 'tag') return '';

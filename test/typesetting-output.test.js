@@ -689,6 +689,33 @@ test('输出标签集合、anchor URL、table span 与 Juice failure seam 严格
   }
 });
 
+test('style value 按 property 拒绝错配关键字隐藏内容和非有限巨大长度', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const hugeLength = `${'9'.repeat(400)}px`;
+  for (const style of [
+    'width:block',
+    'color:auto',
+    'display:none',
+    `width:${hugeLength}`,
+    `width:calc(1px * ${'9'.repeat(400)})`,
+    'font-size:999px'
+  ]) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, '<p>正文</p>'),
+      inlineCss: html => html.replace('<p>', `<p style="${style}">`),
+      themeCss: ''
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+  }
+
+  for (const theme of ['default', 'grace', 'simple']) {
+    const bundle = await createTypesettingOutputBuilder()(
+      outputRequest({ presentation: { ...presentation, theme }, document: { ...document, body: '# 标题\n\n正文\n\n> 引用\n\n![图](https://images.example/theme.png)' } })
+    );
+    assert.equal(bundle.status, 'ready');
+  }
+});
+
 test('clipboard doocs 修正、图片安全样式、边界与 plain text 共享同一修正后正文', async () => {
   const { buildTypesettingOutput, createTypesettingOutputBuilder } = await loadOutputModule();
   const nested = '<ul><li>甲<ul><li>乙</li></ul><ol><li>丙</li></ol></li></ul>';
@@ -770,6 +797,32 @@ test('clipboard doocs 修正、图片安全样式、边界与 plain text 共享�
   assert.equal($clipboard.root().children().first().text(), '\u00a0');
   assert.equal($clipboard.root().children().last().is('p'), true);
   assert.equal(load(plainBundle.html.content)('body > p').length, 0);
+});
+
+test('plain text 忽略真实块容器 DOM 缩进且保留 inline code 与行内元素空格', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: [
+        '> 引用 **加粗** 与 *强调*',
+        '',
+        '<dl>',
+        '  <dt>术语 <em>A</em></dt>',
+        '  <dd>解释 <code>x  y</code></dd>',
+        '</dl>',
+        '',
+        '<figure>',
+        '  <figcaption>图注 <strong>B</strong></figcaption>',
+        '</figure>'
+      ].join('\n')
+    }
+  }));
+  const plain = bundle.clipboard.plain.content;
+
+  assert.equal(bundle.status, 'ready');
+  assert.equal(plain, ['引用 加粗 与 强调', '', '术语 A', '解释 x  y', '', '图注 B'].join('\n'));
+  assert.doesNotMatch(plain, /(^|\n) /u);
 });
 
 test('完整 HTML 有固定安全文档壳四项元信息和同一 canonical 正文', async () => {
