@@ -321,20 +321,23 @@ test('旧文稿默认关闭外链脚注并在下次保存后跨重启持久化',
   for (const source of ['current-version', 'recovery-version', 'legacy-current', 'legacy-backup']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-migration-'));
     const store = new TypesettingStore(path.join(root, '.data'));
-    const legacy = documentWithTheme({ revision: 0, savedAt: '' });
+    const legacy = documentWithTheme({ title: `expected-${source}`, body: `expected-body-${source}`, revision: 0, savedAt: '' });
+    const decoy = documentWithTheme({ title: `decoy-${source}`, body: `decoy-body-${source}`, revision: 0, savedAt: '' });
     try {
       await mkdir(store.dataDir, { recursive: true });
       if (source === 'current-version' || source === 'recovery-version') {
         await mkdir(store.versions, { recursive: true });
         await writeFile(path.join(store.versions, 'current.json'), source === 'current-version' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
-        await writeFile(path.join(store.versions, 'recovery.json'), JSON.stringify(legacy), 'utf8');
+        await writeFile(path.join(store.versions, 'recovery.json'), JSON.stringify(source === 'current-version' ? decoy : legacy), 'utf8');
         await writeFile(store.manifest, JSON.stringify({ current: 'current', recovery: 'recovery' }), 'utf8');
       } else {
         await writeFile(store.file, source === 'legacy-current' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
-        await writeFile(store.backup, JSON.stringify(legacy), 'utf8');
+        await writeFile(store.backup, JSON.stringify(source === 'legacy-current' ? decoy : legacy), 'utf8');
       }
 
       const migrated = await store.load();
+      assert.equal(migrated.title, legacy.title, source);
+      assert.equal(migrated.body, legacy.body, source);
       assert.equal(migrated.convertExternalLinksToFootnotes, false, source);
       assert.equal(migrated.revision, 0, source);
       const saved = await store.save({ ...migrated, convertExternalLinksToFootnotes: true, revision: 1 });
