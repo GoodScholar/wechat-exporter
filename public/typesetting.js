@@ -67,7 +67,11 @@ function isPreviewTarget(target, detachedPreview) {
 function hasValidTargets(diagnostic, body, detachedPreview, kind, count) {
   if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
   if (count !== undefined && diagnostic.targets.length !== count) return false;
-  return diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, detachedPreview));
+  if (!diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, detachedPreview))) return false;
+  const targetKeys = diagnostic.targets.map(target => target.kind === 'source'
+    ? `source:${target.start}:${target.end}`
+    : `preview:${target.id}`);
+  return new Set(targetKeys).size === targetKeys.length;
 }
 function hasOrderedUniqueValues(values, allowed) {
   return Array.isArray(values) && values.length > 0 && new Set(values).size === values.length
@@ -238,10 +242,10 @@ async function preview(version, snapshot) {
     }
     const rendered = await response.json();
     if (!isCurrentRenderRequest(version, snapshot)) return;
-    const detachedPreview = document.createElement('div');
-    detachedPreview.innerHTML = typeof rendered?.html === 'string' ? rendered.html : '';
-    if (!isValidRenderResult(rendered, snapshot.body, detachedPreview)) { markRenderStale(); return; }
-    applyRenderResult(rendered, detachedPreview, version);
+    const inertPreview = document.createElement('template');
+    inertPreview.innerHTML = typeof rendered?.html === 'string' ? rendered.html : '';
+    if (!isValidRenderResult(rendered, snapshot.body, inertPreview.content)) { markRenderStale(); return; }
+    applyRenderResult(rendered, inertPreview.content, version);
   } catch {
     if (isCurrentRenderRequest(version, snapshot)) markRenderStale();
   }
@@ -398,8 +402,10 @@ importForm.addEventListener('submit', async event => {
   finally { button.disabled = false; convertExternalLinks.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
 });
 async function start() {
-  const response = await fetch('/api/typesetting/document');
-  if (response.ok) hydrateDocument((await response.json()).document);
+  try {
+    const response = await fetch('/api/typesetting/document');
+    if (response.ok) hydrateDocument((await response.json()).document);
+  } catch { /* Keep the complete default document and continue with an initial render. */ }
   for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
   convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
   syncThemeControls();

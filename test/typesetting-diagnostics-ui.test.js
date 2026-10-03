@@ -158,6 +158,7 @@ test('客户端只在完整严格 RenderResult 合法时原子应用 HTML presen
     ['code severity 不匹配', (result) => ({ ...result, diagnostics: [{ ...result.diagnostics[0], severity: 'advisory' }, ...result.diagnostics.slice(1)] })],
     ['meta 缺失', (result) => ({ ...result, diagnostics: result.diagnostics.map(item => item.id === 'link-footnote' ? Object.fromEntries(Object.entries(item).filter(([key]) => key !== 'meta')) : item) })],
     ['meta 多余键', (result) => ({ ...result, diagnostics: result.diagnostics.map(item => item.id === 'link-footnote' ? { ...item, meta: { ...item.meta, extra: true } } : item) })],
+    ['重复 preview targets', (result) => ({ ...result, diagnostics: result.diagnostics.map(item => item.id === 'link-footnote' ? { ...item, targets: [item.targets[0], { ...item.targets[0] }], meta: { ...item.meta, occurrences: 2 } } : item) })],
     ['blocked 不一致', (result) => ({ ...result, blocked: false })],
     ['presentation 不完整', (result) => ({ ...result, presentation: { theme: result.presentation.theme, settings: { primaryColor: result.presentation.settings.primaryColor } } })]
   ];
@@ -178,6 +179,55 @@ test('客户端只在完整严格 RenderResult 合法时原子应用 HTML presen
       };
     }), { ...accepted, blocked: 'unknown' }, label);
   }
+});
+
+test('畸形 RenderResult 的 HTTPS 图片在 strict 校验前不会发起请求', async t => {
+  const { page, base } = await withBrowser(t);
+  let sideEffectRequests = 0;
+  await page.route('https://sideeffect.invalid/**', route => { sideEffectRequests++; return route.abort(); });
+  await installRenderFixture(page, request => request.body === '畸形图片响应'
+    ? { ...emptyResult(request.body), html: '<img src="https://sideeffect.invalid/probe.png">', extra: true }
+    : emptyResult(request.body));
+  await page.goto(base() + '/typesetting');
+  await waitForRenderState(page, 'current');
+  const stable = await page.locator('#preview').innerHTML();
+
+  await page.getByLabel('Markdown 正文').fill('畸形图片响应');
+  await waitForRenderState(page, 'stale');
+  await page.waitForTimeout(120);
+  assert.equal(sideEffectRequests, 0);
+  assert.equal(await page.locator('#preview').innerHTML(), stable);
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'unknown');
+});
+
+test('document 启动读取失败仍以默认文稿发出四键 render 且无未捕获错误', async t => {
+  const { page, base } = await withBrowser(t);
+  let mode = 'json';
+  const renderRequests = [];
+  const pageErrors = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.route('**/api/typesetting/document', route => {
+    if (mode === 'json') return route.fulfill({ status: 200, contentType: 'application/json', body: '{' });
+    if (mode === 'network') return route.abort('failed');
+    if (mode === 'non2xx') return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: '暂不可用' }) });
+    return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify({ document: { body: '不完整' } }) });
+  });
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderRequests.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(emptyResult(request.body)) });
+  });
+
+  for (const nextMode of ['json', 'network', 'non2xx', 'shape']) {
+    mode = nextMode;
+    renderRequests.length = 0;
+    if (nextMode === 'json') await page.goto(base() + '/typesetting'); else await page.reload();
+    await waitForRenderState(page, 'current');
+    assert.deepEqual(renderRequests, [{ body: '', theme: 'default', settings, convertExternalLinksToFootnotes: false }], nextMode);
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '', nextMode);
+    assert.equal(await page.getByLabel('外链转脚注').isChecked(), false, nextMode);
+  }
+  assert.deepEqual(pageErrors, []);
 });
 
 test('输入变化立即标记正在重新检查且网络非二百和畸形响应只保留 stale 参考', async t => {
