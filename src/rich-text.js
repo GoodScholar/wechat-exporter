@@ -3,6 +3,13 @@ import sanitizeHtml from 'sanitize-html';
 import TurndownService from 'turndown';
 import { gfm } from 'turndown-plugin-gfm';
 
+const imagePlaceholderMessages = Object.freeze({
+  'local-binary': '本地图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+  'local-path': '本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+  'unsupported-scheme': '图片协议不受支持。请替换为 HTTPS 地址。',
+  'missing-source': '图片缺少来源。请补充 HTTPS 地址。'
+});
+const removedTypeOrder = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
 const markdownConverter = new TurndownService({ headingStyle: 'atx', codeBlockStyle: 'fenced' });
 const defaultEscape = markdownConverter.escape.bind(markdownConverter);
 markdownConverter.escape = value => defaultEscape(value).replace(/\\*<\/?[a-z][^>\n]*>/gi, text => {
@@ -13,6 +20,13 @@ markdownConverter.use(gfm);
 markdownConverter.addRule('block-container', {
   filter: ['div', 'section', 'article', 'main', 'header', 'footer'],
   replacement: content => `\n\n${content}\n\n`
+});
+markdownConverter.addRule('image-placeholder', {
+  filter: node => parseCanonicalImagePlaceholder(node) !== null,
+  replacement: (_, node) => {
+    const { reason, alt = '' } = parseCanonicalImagePlaceholder(node);
+    return `\n\n> ${imagePlaceholderMarkdown(reason, alt)}\n\n`;
+  }
 });
 
 export const specialContentTypes = [
@@ -64,6 +78,74 @@ const mediaSourceRules = {
   'mini-program': [{ selector: 'mp-miniprogram, mp-weapp, [data-miniprogram-appid], [data-weapp-appid], [data-miniprogram]', attributes: ['data-url', 'url'] }],
   poll: [{ selector: 'iframe', attributes: ['src'] }, { selector: 'mp-vote, [data-vote-id], [data-type="vote"], [class~="vote_area"]', attributes: ['data-url', 'url'] }]
 };
+
+function normalizeImageAlt(value) {
+  return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
+}
+
+function escapeMarkdown(value) {
+  return value.replace(/([\\`*_[\]{}()#+.!|<>&~-])/g, '\\$1');
+}
+
+function formatImagePlaceholder(reason, alt) {
+  const text = `[图片占位：${reason}] ${imagePlaceholderMessages[reason]}`;
+  return alt ? `${text} 替代文本：${alt}` : text;
+}
+
+function imagePlaceholderText(reason, alt) {
+  return formatImagePlaceholder(reason, normalizeImageAlt(alt));
+}
+
+function imagePlaceholderMarkdown(reason, alt) {
+  return formatImagePlaceholder(reason, escapeMarkdown(normalizeImageAlt(alt)));
+}
+
+function parseCanonicalImagePlaceholder(node) {
+  if (node.nodeName !== 'BLOCKQUOTE' || node.children.length !== 1 || node.firstElementChild?.nodeName !== 'P') return null;
+  const paragraph = node.firstElementChild;
+  if (paragraph.childNodes.length !== 1 || paragraph.firstChild?.nodeType !== 3) return null;
+  const text = paragraph.textContent;
+  for (const [reason, message] of Object.entries(imagePlaceholderMessages)) {
+    const fixed = `[图片占位：${reason}] ${message}`;
+    if (text === fixed) return { reason };
+    const prefix = `${fixed} 替代文本：`;
+    if (!text.startsWith(prefix)) continue;
+    const alt = text.slice(prefix.length);
+    if (normalizeImageAlt(alt)) return { reason, alt };
+  }
+  return null;
+}
+
+function classifyImageSource(value) {
+  const source = typeof value === 'string' ? value.trim() : '';
+  if (!source) return { reason: 'missing-source' };
+  if (/^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
+  if (/^\/\//.test(source)) return { reason: 'unsupported-scheme' };
+  try {
+    const url = new URL(source);
+    if (url.protocol === 'data:' || url.protocol === 'blob:') return { reason: 'local-binary' };
+    if (url.protocol === 'file:') return { reason: 'local-path' };
+    if (url.protocol === 'https:' && !url.username && !url.password) return { url: url.href };
+    return { reason: 'unsupported-scheme' };
+  } catch {
+    return { reason: 'local-path' };
+  }
+}
+
+function replaceImages($, downgraded) {
+  $('img').each((_, element) => {
+    const node = $(element);
+    const classification = classifyImageSource(node.attr('src'));
+    if (classification.url) {
+      node.attr('src', classification.url);
+      return;
+    }
+    const placeholder = $('<blockquote><p></p></blockquote>');
+    placeholder.find('p').text(imagePlaceholderText(classification.reason, node.attr('alt')));
+    node.replaceWith(placeholder);
+    downgraded.push({ type: 'image', reason: classification.reason });
+  });
+}
 
 function safeUrl(value, { image = false } = {}) {
   try {
@@ -131,9 +213,9 @@ function removeUnsafeContent($, removed) {
       const safe = safeUrl(value, { image: node.is('img') && name === 'src' });
       if (safe) node.attr(name, safe);
       else {
-        node.removeAttr(name);
         addOnce(removed, 'unsafe-url');
-        if (node.is('img') && name === 'src') node.remove();
+        if (node.is('img') && name === 'src') continue;
+        node.removeAttr(name);
       }
     }
   });
@@ -146,6 +228,7 @@ export function convertRichText(html) {
   const downgraded = [];
   removeUnsafeContent($, removed);
   replaceSpecialContent($, downgraded);
+  replaceImages($, downgraded);
   const block = $('body').find('p, div, section, article, main, header, footer, h1, h2, h3, h4, h5, h6, ul, ol, blockquote, pre, table, hr').length > 0;
   const safeHtml = sanitizeHtml($('body').html() || '', {
     allowedTags: ['p', 'br', 'div', 'section', 'article', 'main', 'header', 'footer', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'strong', 'b', 'em', 'i', 'del', 's', 'a', 'img', 'ul', 'ol', 'li', 'blockquote', 'pre', 'code', 'hr', 'table', 'thead', 'tbody', 'tr', 'th', 'td'],
@@ -156,5 +239,5 @@ export function convertRichText(html) {
   });
   const result = markdownConverter.turndown(safeHtml).trim();
   if (!result) fail(richTextErrorCodes.EMPTY_RICH_TEXT);
-  return { markdown: result, removed, downgraded, block };
+  return { markdown: result, removed: removedTypeOrder.filter(type => removed.includes(type)), downgraded, block };
 }

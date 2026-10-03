@@ -116,6 +116,102 @@ test('文章导入替换内容但保留当前主题和全部非当前主题设�
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('文章导入成功失败冲突和原子恢复均保留外链脚注开关', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-footnotes-'));
+  const dataDir = path.join(root, '.data');
+  const store = new TypesettingStore(dataDir);
+  let mode = 'success';
+  const fetchArticle = async () => {
+    if (mode === 'network') throw new Error('socket closed');
+    return articleHtml;
+  };
+  let server;
+  const assertFootnotesEnabled = async () => {
+    const visible = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    assert.equal(visible.convertExternalLinksToFootnotes, true);
+    assert.equal((await new TypesettingStore(dataDir).load()).convertExternalLinksToFootnotes, true);
+    return visible;
+  };
+  try {
+    const current = await store.save({
+      title: '原有标题', author: '原作者', account: '原公众号', publishedAt: '2026-09-01', body: '原有正文',
+      convertExternalLinksToFootnotes: true, revision: 1
+    });
+    server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle }));
+
+    const imported = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(imported.status, 200);
+    const document = (await imported.json()).document;
+    assert.deepEqual(Object.fromEntries(['title', 'author', 'account', 'publishedAt'].map(field => [field, document[field]])), {
+      title: '可导入文章', author: '测试作者', account: '测试公众号', publishedAt: '2026-09-19'
+    });
+    assert.match(document.body, /## 第一节/);
+    assert.equal(document.theme, current.theme);
+    assert.deepEqual(document.themeSettings, current.themeSettings);
+    assert.equal(document.convertExternalLinksToFootnotes, true);
+    assert.equal((await assertFootnotesEnabled()).revision, 2);
+
+    const unconfirmed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: false });
+    assert.equal(unconfirmed.status, 409);
+    assert.equal((await unconfirmed.json()).error.code, 'CONFIRM_REQUIRED');
+    await assertFootnotesEnabled();
+
+    mode = 'network';
+    const failed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: true });
+    assert.equal(failed.status, 502);
+    assert.equal((await failed.json()).error.code, 'NETWORK_READ');
+    await assertFootnotesEnabled();
+
+    const conflict = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error.code, 'REVISION_CONFLICT');
+    await assertFootnotesEnabled();
+  } finally {
+    if (server) await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
+    const phaseRoot = await mkdtemp(path.join(os.tmpdir(), `wechat-typesetting-import-footnotes-${phase}-`));
+    const phaseDataDir = path.join(phaseRoot, '.data');
+    let failingPhase = '';
+    let candidateWrites = 0;
+    const writeAtomically = async (file, text) => {
+      if (failingPhase && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if ((phase === 'current-version' && candidateWrites === 1) || (phase === 'recovery-version' && candidateWrites === 2)) throw new Error('disk denied');
+      }
+      if (failingPhase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
+      const temporary = `${file}.test`;
+      await writeFile(temporary, text, 'utf8');
+      await rename(temporary, file);
+    };
+    const phaseStore = new TypesettingStore(phaseDataDir, { writeAtomically });
+    let phaseServer;
+    try {
+      await phaseStore.save({
+        title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文',
+        convertExternalLinksToFootnotes: true, revision: 1
+      });
+      failingPhase = phase;
+      candidateWrites = 0;
+      phaseServer = await serve(createApp({ dataDir: phaseDataDir, interval: 0, typesettingStore: phaseStore, fetchArticle: async () => articleHtml }));
+      const response = await post(phaseServer.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+      assert.equal(response.status, 500, phase);
+      assert.equal((await response.json()).error.code, 'PERSISTENCE_FAILED', phase);
+      const visible = (await (await fetch(phaseServer.base + '/api/typesetting/document')).json()).document;
+      assert.equal(visible.body, '旧正文', phase);
+      assert.equal(visible.convertExternalLinksToFootnotes, true, phase);
+      const recovered = await new TypesettingStore(phaseDataDir).load();
+      assert.equal(recovered.body, '旧正文', phase);
+      assert.equal(recovered.convertExternalLinksToFootnotes, true, phase);
+    } finally {
+      if (phaseServer) await phaseServer.close();
+      await rm(phaseRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test('任一版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
   for (const phase of ['current-version', 'recovery-version', 'manifest']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
@@ -463,11 +559,236 @@ test('导入前保存失败只尝试一次，恢复编辑控件并保留文稿',
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('仅排版页面允许 HTTPS 图片来源，文章导出页保持原有 CSP', async () => {
+test('成功导入清除审计而失败导入冲突及 body 未变化水合保留审计和脚注开关', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-audit-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify({ markdown: '安全正文', removed: ['script'], downgraded: [], block: false }) }));
+    await page.goto(server.base + '/typesetting');
+    page.on('dialog', dialog => dialog.accept());
+    await page.getByLabel('外链转脚注').check();
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+    await page.evaluate(() => { window.confirm = () => true; const body = document.querySelector('#document-body'); body.setSelectionRange(body.value.length, body.value.length); const data = new DataTransfer(); data.setData('text/html', '<script>危险</script><p>安全正文</p>'); body.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data })); });
+    const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+    await audit.waitFor();
+
+    await page.getByLabel('标题').fill('body 不变保存');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+    assert.equal(await audit.count(), 1);
+    assert.equal(await page.getByLabel('外链转脚注').isChecked(), true);
+
+    await page.route('**/api/typesetting/import', route => route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({ error: { message: '固定冲突' } }) }));
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await page.getByText('固定冲突', { exact: false }).waitFor();
+    assert.equal(await audit.count(), 1);
+    assert.equal(await page.getByLabel('外链转脚注').isChecked(), true);
+    await page.unroute('**/api/typesetting/import');
+
+    for (const fixture of [
+      { status: 500, body: { error: { message: '固定失败' } }, message: '固定失败' },
+      { status: 200, body: { document: { body: '畸形替换' } }, message: '服务返回了不完整的文稿' }
+    ]) {
+      await page.route('**/api/typesetting/import', route => route.fulfill({ status: fixture.status, contentType: 'application/json', body: JSON.stringify(fixture.body) }));
+      const beforeBody = await page.getByLabel('Markdown 正文').inputValue();
+      await page.getByRole('button', { name: '导入文章' }).click();
+      await page.getByText(fixture.message, { exact: false }).waitFor();
+      assert.equal(await page.getByLabel('Markdown 正文').inputValue(), beforeBody);
+      assert.equal(await audit.count(), 1);
+      assert.equal(await page.getByLabel('外链转脚注').isChecked(), true);
+      await page.unroute('**/api/typesetting/import');
+    }
+
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await page.getByLabel('标题').evaluate(input => new Promise(resolve => { const timer = setInterval(() => { if (input.value === '可导入文章') { clearInterval(timer); resolve(); } }, 10); }));
+    assert.equal(await audit.count(), 0);
+    assert.equal(await page.getByLabel('外链转脚注').isChecked(), true);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('导入期间脚注开关禁用恢复且成功失败都保留原选择', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-toggle-lock-'));
+  const dataDir = path.join(root, '.data');
+  let mode = 'success';
+  let release;
+  let reached;
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => { reached(); await new Promise(resolve => { release = resolve; }); if (mode === 'failure') throw new Error('fixed failure'); return articleHtml; } }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base, '');
+    const page = await fixturePage(browser);
+    await page.goto(server.base + '/typesetting');
+    page.on('dialog', dialog => dialog.accept());
+    const toggle = page.getByLabel('外链转脚注');
+    await toggle.check();
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+
+    for (const expectedMode of ['failure', 'success']) {
+      mode = expectedMode;
+      const pending = new Promise(resolve => { reached = resolve; });
+      await page.getByRole('button', { name: '导入文章' }).click();
+      await pending;
+      assert.equal(await toggle.isDisabled(), true);
+      assert.equal(await toggle.isChecked(), true);
+      release();
+      if (mode === 'failure') await page.getByText('读取文章失败', { exact: false }).waitFor();
+      else await page.getByLabel('标题').evaluate(input => new Promise(resolve => { const timer = setInterval(() => { if (input.value === '可导入文章') { clearInterval(timer); resolve(); } }, 10); }));
+      assert.equal(await toggle.isDisabled(), false);
+      assert.equal(await toggle.isChecked(), true);
+    }
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('挂起富文本响应在导入开始后失效且不得插入或覆盖旧审计', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-rich-race-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    let richRequests = 0;
+    let releaseRich;
+    let secondRichReached;
+    await page.route('**/api/typesetting/rich-text', async route => {
+      richRequests++;
+      if (richRequests === 2) {
+        secondRichReached();
+        await new Promise(resolve => { releaseRich = resolve; });
+        return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ markdown: '不得插入', removed: ['style'], downgraded: [], block: false }) });
+      }
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ markdown: '建立审计', removed: ['script'], downgraded: [], block: false }) });
+    });
+    let releaseImport;
+    let importReached;
+    await page.route('**/api/typesetting/import', async route => {
+      importReached();
+      await new Promise(resolve => { releaseImport = resolve; });
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: '固定导入失败' } }) });
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.evaluate(() => {
+      window.confirm = () => true;
+      const native = document.execCommand.bind(document);
+      window.__nativeExecCommandForImportRace = native;
+      document.execCommand = (command, _ui, value) => {
+        if (command !== 'insertText') return native(command, _ui, value);
+        const body = document.querySelector('#document-body');
+        body.setRangeText(value, body.selectionStart, body.selectionEnd, 'end');
+        body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+        return true;
+      };
+    });
+    const paste = html => page.evaluate(value => {
+      const body = document.querySelector('#document-body');
+      const data = new DataTransfer();
+      data.setData('text/html', value);
+      body.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+    }, html);
+    await page.getByLabel('Markdown 正文').evaluate(body => body.setSelectionRange(body.value.length, body.value.length));
+    await paste('<p>建立审计</p>');
+    const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+    await audit.waitFor();
+    const auditId = await audit.getAttribute('data-diagnostic-id');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+    const bodyBefore = await page.getByLabel('Markdown 正文').inputValue();
+
+    const richPending = new Promise(resolve => { secondRichReached = resolve; });
+    await page.getByLabel('Markdown 正文').evaluate(body => body.setSelectionRange(body.value.length, body.value.length));
+    await paste('<p>不得插入</p>');
+    await richPending;
+    const importPending = new Promise(resolve => { importReached = resolve; });
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await importPending;
+    releaseRich();
+    await page.getByText('正文或选区已变化', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), bodyBefore);
+    assert.equal(await audit.getAttribute('data-diagnostic-id'), auditId);
+    assert.doesNotMatch(await page.locator('#rich-text-message').textContent(), /已转换富文本/);
+    releaseImport();
+    await page.getByText('固定导入失败', { exact: false }).waitFor();
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('导入成功响应遇到本地版本漂移不覆盖输入且保留自动保存冲突', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-version-drift-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    let releaseImportResponse;
+    let serverImportCommitted;
+    await page.route('**/api/typesetting/import', async route => {
+      const response = await route.fetch();
+      serverImportCommitted();
+      await new Promise(resolve => { releaseImportResponse = resolve; });
+      await route.fulfill({ response });
+    });
+    let saveRequests = 0;
+    await page.route('**/api/typesetting/document', async route => {
+      if (route.request().method() === 'POST') saveRequests++;
+      await route.continue();
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.evaluate(() => { window.confirm = () => true; });
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    const committed = new Promise(resolve => { serverImportCommitted = resolve; });
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await committed;
+
+    await page.getByLabel('Markdown 正文').evaluate(body => {
+      body.value = '导入期间本地新正文';
+      body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '导入期间本地新正文' }));
+    });
+    await page.waitForTimeout(900);
+    assert.ok(saveRequests >= 1, '导入期间产生的本地 input 必须继续触发自动保存');
+    await page.getByText('未保存', { exact: true }).waitFor();
+
+    releaseImportResponse();
+    await page.locator('#import-message').getByText('导入期间文稿已变化', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '导入期间本地新正文');
+    assert.equal(await page.getByText('未保存', { exact: true }).count(), 1);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('仅排版页 CSP 允许 self 与 HTTPS 图片并拒绝 http data blob', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-csp-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
   try {
-    assert.doesNotMatch((await fetch(server.base + '/')).headers.get('content-security-policy'), /img-src 'self' data: https:/);
-    assert.match((await fetch(server.base + '/typesetting')).headers.get('content-security-policy'), /img-src 'self' data: https:/);
+    const exportResponse = await fetch(server.base + '/');
+    const typesettingResponse = await fetch(server.base + '/typesetting');
+    const aliasResponse = await fetch(server.base + '/typesetting.html', { redirect: 'manual' });
+    const imageSources = response => response.headers.get('content-security-policy').split(';')
+      .map(directive => directive.trim().split(/\s+/)).find(([name]) => name === 'img-src').slice(1);
+    assert.deepEqual(imageSources(exportResponse), ["'self'", 'data:']);
+    assert.deepEqual(imageSources(typesettingResponse), ["'self'", 'https:']);
+    assert.equal(typesettingResponse.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(aliasResponse.status, 308);
+    assert.equal(aliasResponse.headers.get('location'), '/typesetting');
+    assert.deepEqual(imageSources(aliasResponse), ["'self'", 'https:']);
+    assert.equal(aliasResponse.headers.get('referrer-policy'), 'no-referrer');
+    for (const aliasPath of [
+      '/typesetting%2ehtml', '/typesetting%2Ehtml', '/%74ypesetting.html',
+      '/%54ypesetting.html', '/TYPESETTING%2eHTML', '/%74YPESETTING.HTML'
+    ]) {
+      const encodedAliasResponse = await fetch(server.base + aliasPath, { redirect: 'manual' });
+      assert.ok([200, 308, 404].includes(encodedAliasResponse.status), aliasPath);
+      if (encodedAliasResponse.status === 404) {
+        assert.doesNotMatch(await encodedAliasResponse.text(), /公众号排版/, aliasPath);
+        continue;
+      }
+      if (encodedAliasResponse.status === 308) assert.equal(encodedAliasResponse.headers.get('location'), '/typesetting', aliasPath);
+      assert.deepEqual(imageSources(encodedAliasResponse), ["'self'", 'https:'], aliasPath);
+      assert.equal(encodedAliasResponse.headers.get('referrer-policy'), 'no-referrer', aliasPath);
+    }
+    assert.doesNotMatch(await typesettingResponse.text(), /<link rel="icon" href="data:/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

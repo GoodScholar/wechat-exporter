@@ -1,13 +1,38 @@
 const $ = selector => document.querySelector(selector);
 const fields = { title: $('#document-title'), author: $('#document-author'), account: $('#document-account'), publishedAt: $('#document-published-at'), body: $('#document-body') };
 const themeControls = { theme: $('#document-theme'), primaryColor: $('#theme-primary-color'), fontSize: $('#theme-font-size'), lineHeight: $('#theme-line-height'), blockSpacing: $('#theme-block-spacing'), reset: $('#reset-theme') };
+const convertExternalLinks = $('#convert-external-links');
 const importForm = $('#article-import');
 const importUrl = $('#import-url');
 const importMessage = $('#import-message');
+const renderStatus = $('#render-status');
+const formatChecks = $('#format-checks');
 const themeNames = [...themeControls.theme.options].map(option => option.value);
 const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
+const documentKeys = [...Object.keys(fields), 'revision', 'savedAt', 'theme', 'themeSettings', 'convertExternalLinksToFootnotes'];
+const severityNames = ['blocker', 'conversion', 'advisory'];
+const safeRemovedTypes = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
+const specialContentTypes = ['video', 'audio', 'embed', 'mini-program', 'poll'];
+const imageDiagnosticCodes = ['IMAGE_LOAD_FAILED', 'IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE'];
+const previewAllowedTags = new Set([
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
+  'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt', 'rtc',
+  'ruby', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr',
+  'caption', 'col', 'colgroup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr'
+]);
+const previewAllowedAttributes = Object.freeze({
+  a: ['href', 'title', 'data-format-target'],
+  blockquote: ['class', 'data-format-target', 'tabindex', 'role'],
+  figure: ['class', 'data-format-target', 'tabindex', 'role'],
+  p: ['class'],
+  img: ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'],
+  th: ['colspan', 'rowspan'],
+  td: ['colspan', 'rowspan'],
+  code: ['class']
+});
 const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
-let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings() };
+let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings(), convertExternalLinksToFootnotes: false };
 let saveTimer;
 let previewTimer;
 let saving = false;
@@ -16,12 +41,22 @@ let saveError;
 let dirty = false;
 let changeVersion = 0;
 let previewVersion = 0;
+let appliedRenderVersion = 0;
+let renderFresh = false;
+let renderBlocked = false;
+let staticDiagnostics = [];
+let dynamicImageDiagnostics = [];
+let dynamicImageDiagnosticSequence = 0;
+let richTextAudit;
+let richTextAuditSequence = 0;
+const pendingImageHandlers = new WeakMap();
 let richPastePending = false;
 let richPasteVersion = 0;
 let activeRichPaste;
+let controlledBodyInsertion = false;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
-function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
+function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked; }
 function currentThemeSettings() { return documentModel.themeSettings[documentModel.theme]; }
 function hasExactKeys(value, keys) { return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)); }
 function isKnownOption(control, value) { return [...control.options].some(option => option.value === value); }
@@ -30,14 +65,170 @@ function isCompleteThemeSettings(themeSettings) {
     && themeSettingNames.every(name => isKnownOption(themeControls[name], themeSettings[theme][name])));
 }
 function isCompleteDocument(document) {
-  return typeof document === 'object' && document !== null && fields && Object.keys(fields).every(name => typeof document[name] === 'string')
+  return hasExactKeys(document, documentKeys) && Object.keys(fields).every(name => typeof document[name] === 'string')
     && Number.isSafeInteger(document.revision) && document.revision >= 0 && typeof document.savedAt === 'string'
-    && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings);
+    && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings)
+    && typeof document.convertExternalLinksToFootnotes === 'boolean';
 }
 function isValidPresentation(presentation) {
-  return typeof presentation === 'object' && presentation !== null && isKnownOption(themeControls.theme, presentation.theme)
+  return hasExactKeys(presentation, ['theme', 'settings']) && isKnownOption(themeControls.theme, presentation.theme)
     && hasExactKeys(presentation.settings, themeSettingNames)
     && themeSettingNames.every(name => isKnownOption(themeControls[name], presentation.settings[name]));
+}
+function isNonEmptyString(value) { return typeof value === 'string' && value.length > 0; }
+function isPositiveInteger(value) { return Number.isSafeInteger(value) && value > 0; }
+function isSourceTarget(target, body) {
+  return hasExactKeys(target, ['kind', 'start', 'end']) && target.kind === 'source'
+    && Number.isSafeInteger(target.start) && target.start >= 0
+    && Number.isSafeInteger(target.end) && target.start <= target.end && target.end <= body.length;
+}
+function isPreviewTarget(target, detachedPreview) {
+  if (!hasExactKeys(target, ['kind', 'id']) || target.kind !== 'preview' || !isNonEmptyString(target.id)) return false;
+  return [...detachedPreview.querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target.id).length === 1;
+}
+function hasExactElementAttributes(element, names) {
+  return element.attributes.length === names.length && names.every(name => element.hasAttribute(name));
+}
+function hrefForProtocolClassification(value) {
+  let href = value.replace(/[\u0000-\u0020]+/gu, '');
+  while (true) {
+    const start = href.indexOf('<!--');
+    if (start === -1) return href;
+    const end = href.indexOf('-->', start + 4);
+    if (end === -1) return href;
+    href = href.slice(0, start) + href.slice(end + 3);
+  }
+}
+function hasAllowedPreviewElement(element) {
+  const tag = element.localName;
+  if (!previewAllowedTags.has(tag)) return false;
+  const allowedAttributes = previewAllowedAttributes[tag] || [];
+  if ([...element.attributes].some(attribute => !allowedAttributes.includes(attribute.name))) return false;
+  if (tag === 'a' && element.hasAttribute('href')) {
+    const href = hrefForProtocolClassification(element.getAttribute('href'));
+    if (/^[\\/]{2}/u.test(href)) return false;
+    // Mirror launder.naughtyHref: classify the scheme without requiring a fully parseable URL.
+    const scheme = href.match(/^([a-zA-Z][a-zA-Z0-9.\-+]*):/u);
+    if (scheme && !['http', 'https', 'mailto'].includes(scheme[1].toLowerCase())) return false;
+  }
+  if (tag === 'blockquote') {
+    if (!element.hasAttribute('class')) return element.attributes.length === 0;
+    return hasExactElementAttributes(element, previewAllowedAttributes.blockquote)
+      && element.getAttribute('class') === 'format-special-placeholder'
+      && element.getAttribute('role') === 'note' && element.getAttribute('tabindex') === '0';
+  }
+  if (tag === 'figure') {
+    if (!element.hasAttribute('class')) return element.attributes.length === 0;
+    return hasExactElementAttributes(element, previewAllowedAttributes.figure)
+      && element.getAttribute('class') === 'format-image-placeholder'
+      && element.getAttribute('role') === 'note' && element.getAttribute('tabindex') === '0';
+  }
+  if (tag === 'p' && element.hasAttribute('class')) {
+    return hasExactElementAttributes(element, ['class']) && element.getAttribute('class') === 'typeset-footnotes';
+  }
+  return true;
+}
+function hasStrictPreviewMarkup(detachedPreview) {
+  const elements = [...detachedPreview.querySelectorAll('*')];
+  if (!elements.every(hasAllowedPreviewElement)) return false;
+  const targets = [...detachedPreview.querySelectorAll('[data-format-target]')]
+    .map(node => node.getAttribute('data-format-target'));
+  if (targets.some(target => !isNonEmptyString(target)) || new Set(targets).size !== targets.length) return false;
+
+  const imageAttributes = ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'];
+  return elements.filter(element => element.localName === 'img').every(img => {
+    if (!hasExactKeys(Object.fromEntries([...img.attributes].map(attribute => [attribute.name, attribute.value])), imageAttributes)) return false;
+    if (img.getAttribute('referrerpolicy') !== 'no-referrer' || img.getAttribute('data-image-state') !== 'pending') return false;
+    try {
+      const source = new URL(img.getAttribute('src'));
+      return source.protocol === 'https:' && !source.username && !source.password;
+    } catch { return false; }
+  });
+}
+function hasValidTargets(diagnostic, body, detachedPreview, kind, count) {
+  if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
+  if (count !== undefined && diagnostic.targets.length !== count) return false;
+  if (!diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, detachedPreview))) return false;
+  const targetKeys = diagnostic.targets.map(target => target.kind === 'source'
+    ? `source:${target.start}:${target.end}`
+    : `preview:${target.id}`);
+  return new Set(targetKeys).size === targetKeys.length;
+}
+function hasOrderedUniqueValues(values, allowed) {
+  return Array.isArray(values) && values.length > 0 && new Set(values).size === values.length
+    && values.every(value => allowed.includes(value))
+    && values.every((value, index) => index === 0 || allowed.indexOf(values[index - 1]) < allowed.indexOf(value));
+}
+function isValidDiagnostic(diagnostic, body, detachedPreview) {
+  if (typeof diagnostic !== 'object' || diagnostic === null || Array.isArray(diagnostic)
+    || !isNonEmptyString(diagnostic.id) || !isNonEmptyString(diagnostic.message)) return false;
+  const baseKeys = ['id', 'code', 'severity', 'message', 'targets'];
+  if (diagnostic.code === 'EMPTY_BODY') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && body.trim() === '' && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === 0;
+  }
+  if (diagnostic.code === 'RENDER_FAILED') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === body.length;
+  }
+  if (diagnostic.code === 'EXTERNAL_LINK_TO_FOOTNOTE') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview')
+      && hasExactKeys(diagnostic.meta, ['footnote', 'occurrences'])
+      && isPositiveInteger(diagnostic.meta.footnote) && diagnostic.meta.occurrences === diagnostic.targets.length;
+  }
+  if (diagnostic.code === 'SPECIAL_CONTENT_PLACEHOLDER') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview', 1)
+      && hasExactKeys(diagnostic.meta, ['type']) && specialContentTypes.includes(diagnostic.meta.type);
+  }
+  if (diagnostic.code === 'UNSAFE_RICH_TEXT_REMOVED') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && hasExactKeys(diagnostic.meta, ['types']) && hasOrderedUniqueValues(diagnostic.meta.types, safeRemovedTypes);
+  }
+  if (imageDiagnosticCodes.includes(diagnostic.code)) {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'advisory'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview', 1);
+  }
+  return false;
+}
+function isValidRenderResult(value, body, detachedPreview) {
+  if (!hasExactKeys(value, ['html', 'presentation', 'diagnostics', 'blocked'])
+    || typeof value.html !== 'string' || !isValidPresentation(value.presentation)
+    || !Array.isArray(value.diagnostics) || typeof value.blocked !== 'boolean') return false;
+  if (!hasStrictPreviewMarkup(detachedPreview)) return false;
+  if (value.diagnostics.some(item => !isValidDiagnostic(item, body, detachedPreview))) return false;
+  if (new Set(value.diagnostics.map(item => item.id)).size !== value.diagnostics.length) return false;
+  const previewTargets = value.diagnostics.flatMap(item => item.targets.filter(target => target.kind === 'preview').map(target => target.id));
+  if (new Set(previewTargets).size !== previewTargets.length) return false;
+  return value.blocked === value.diagnostics.some(item => item.severity === 'blocker');
+}
+function isSafeHttpUrl(value) {
+  if (typeof value !== 'string') return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+  } catch { return false; }
+}
+function isValidStructuredDowngrade(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  if (specialContentTypes.includes(value.type)) {
+    return (hasExactKeys(value, ['type']) || hasExactKeys(value, ['type', 'sourceUrl']) && isSafeHttpUrl(value.sourceUrl));
+  }
+  return hasExactKeys(value, ['type', 'reason']) && value.type === 'image'
+    && ['local-binary', 'local-path', 'unsupported-scheme', 'missing-source'].includes(value.reason);
+}
+function isValidRichTextResult(value) {
+  return hasExactKeys(value, ['markdown', 'removed', 'downgraded', 'block'])
+    && typeof value.markdown === 'string' && value.markdown.trim() !== '' && Array.isArray(value.removed)
+    && new Set(value.removed).size === value.removed.length
+    && value.removed.every(type => safeRemovedTypes.includes(type))
+    && Array.isArray(value.downgraded) && value.downgraded.every(isValidStructuredDowngrade)
+    && typeof value.block === 'boolean';
 }
 function syncThemeControls() {
   themeControls.theme.value = documentModel.theme;
@@ -51,9 +242,16 @@ function applyPresentation(preview, presentation) {
   preview.style.setProperty('--md-line-height', presentation.settings.lineHeight);
   preview.style.setProperty('--md-block-spacing', presentation.settings.blockSpacing);
 }
-function hydrateDocument(document) {
+function hydrateDocument(document, applyFields = false) {
   if (!isCompleteDocument(document)) return false;
+  const bodyChanged = applyFields && fields.body.value !== document.body;
   documentModel = document;
+  if (applyFields) {
+    for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
+    convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
+    syncThemeControls();
+  }
+  if (bodyChanged) clearRichTextAudit();
   return true;
 }
 function hasContent() { return Object.values(fields).some(input => input.value.trim()); }
@@ -68,24 +266,218 @@ function showImportMessage(error) {
     importMessage.append(link);
   }
 }
-async function preview(version) {
-  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() } }) });
-  if (!response.ok) return;
-  const rendered = await response.json();
-  if (version === previewVersion && typeof rendered?.html === 'string' && isValidPresentation(rendered.presentation)) {
-    const preview = $('#preview');
-    const previous = { html: preview.innerHTML, className: preview.className, style: preview.getAttribute('style') };
-    try {
-      preview.innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
-      applyPresentation(preview, rendered.presentation);
-    } catch {
-      preview.innerHTML = previous.html;
-      preview.className = previous.className;
-      if (previous.style === null) preview.removeAttribute('style'); else preview.setAttribute('style', previous.style);
+function renderSnapshot() {
+  return Object.freeze({
+    body: documentModel.body,
+    theme: documentModel.theme,
+    settings: Object.freeze({ ...currentThemeSettings() }),
+    convertExternalLinksToFootnotes: documentModel.convertExternalLinksToFootnotes
+  });
+}
+function sameRenderInput(left, right) {
+  return left.body === right.body && left.theme === right.theme
+    && left.convertExternalLinksToFootnotes === right.convertExternalLinksToFootnotes
+    && themeSettingNames.every(name => left.settings[name] === right.settings[name]);
+}
+function isCurrentRenderRequest(version, snapshot) { return version === previewVersion && sameRenderInput(snapshot, renderSnapshot()); }
+function syncRenderStatus(state) {
+  renderStatus.dataset.state = state;
+  renderStatus.dataset.blocked = renderFresh ? String(renderBlocked) : 'unknown';
+  renderStatus.textContent = state === 'checking' ? '正在重新检查'
+    : state === 'stale' ? '预览不是当前内容'
+      : renderBlocked ? '检查完成，存在阻断问题' : '检查完成';
+  formatChecks.setAttribute('aria-busy', state === 'checking' ? 'true' : 'false');
+  formatChecks.setAttribute('aria-disabled', renderFresh ? 'false' : 'true');
+}
+function markRenderChecking() { renderFresh = false; syncRenderStatus('checking'); }
+function markRenderStale() { renderFresh = false; syncRenderStatus('stale'); }
+function focusDiagnostic(diagnostic, version) {
+  if (!renderFresh || version !== appliedRenderVersion) return;
+  const target = diagnostic.targets[0];
+  if (target.kind === 'source') {
+    fields.body.focus();
+    fields.body.setSelectionRange(target.start, target.end);
+    return;
+  }
+  const matches = [...$('#preview').querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target.id);
+  if (matches.length !== 1) return;
+  const node = matches[0];
+  $('#preview').querySelectorAll('.format-target-highlight').forEach(item => item.classList.remove('format-target-highlight'));
+  node.scrollIntoView({ block: 'center', behavior: 'auto' });
+  node.focus({ preventScroll: true });
+  node.classList.add('format-target-highlight');
+  setTimeout(() => node.classList.remove('format-target-highlight'), 1600);
+}
+function renderDiagnosticGroups(version) {
+  if (richTextAudit) {
+    const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics].map(item => item.id));
+    if (used.has(richTextAudit.id)) richTextAudit = { ...richTextAudit, id: nextRichTextAuditId() };
+  }
+  const allDiagnostics = [...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])];
+  for (const severity of severityNames) {
+    const group = formatChecks.querySelector(`[data-check-severity="${severity}"]`);
+    const diagnostics = allDiagnostics.filter(item => item.severity === severity);
+    group.querySelector('[data-check-count]').textContent = String(diagnostics.length);
+    const list = group.querySelector('[data-check-list]');
+    const fragment = document.createDocumentFragment();
+    if (diagnostics.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'format-check-empty';
+      empty.textContent = '暂无';
+      fragment.append(empty);
+    } else {
+      for (const diagnostic of diagnostics) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'format-check-item';
+        button.dataset.diagnosticId = diagnostic.id;
+        if (diagnostic.code === 'UNSAFE_RICH_TEXT_REMOVED') button.dataset.diagnosticTypes = diagnostic.meta.types.join(',');
+        button.textContent = diagnostic.message;
+        button.addEventListener('click', () => focusDiagnostic(diagnostic, version));
+        fragment.append(button);
+      }
     }
+    list.replaceChildren(fragment);
   }
 }
-function schedulePreview() { const version = ++previewVersion; clearTimeout(previewTimer); previewTimer = setTimeout(() => { void preview(version); }, 180); }
+function removePendingImageHandlers(img) {
+  const handlers = pendingImageHandlers.get(img);
+  if (!handlers) return;
+  img.removeEventListener('load', handlers.load);
+  img.removeEventListener('error', handlers.error);
+  pendingImageHandlers.delete(img);
+}
+function isCurrentPendingImage(img, previewRoot, version) {
+  if (!renderFresh || version !== appliedRenderVersion || version !== previewVersion
+    || previewRoot !== $('#preview') || !previewRoot.contains(img)
+    || img.getAttribute('data-image-state') !== 'pending') return false;
+  const target = img.getAttribute('data-format-target');
+  if (!target) return false;
+  const matches = [...previewRoot.querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target);
+  return matches.length === 1 && matches[0] === img;
+}
+function nextDynamicImageDiagnosticId(version) {
+  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])].map(item => item.id));
+  let id;
+  do id = `runtime-image-load-failed-${version}-${++dynamicImageDiagnosticSequence}`;
+  while (used.has(id));
+  return id;
+}
+function nextRichTextAuditId() {
+  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics, ...(richTextAudit ? [richTextAudit] : [])].map(item => item.id));
+  let id;
+  do id = `rich-text-removal-${++richTextAuditSequence}`;
+  while (used.has(id));
+  return id;
+}
+function clearRichTextAudit() {
+  if (!richTextAudit) return;
+  richTextAudit = undefined;
+  renderDiagnosticGroups(appliedRenderVersion);
+}
+function replaceRichTextAudit(removed, start, insertedText) {
+  richTextAudit = undefined;
+  if (removed.length > 0) richTextAudit = {
+    id: nextRichTextAuditId(),
+    code: 'UNSAFE_RICH_TEXT_REMOVED',
+    severity: 'conversion',
+    message: '富文本粘贴时已移除不安全内容。',
+    targets: [{ kind: 'source', start, end: start + insertedText.length }],
+    meta: { types: safeRemovedTypes.filter(type => removed.includes(type)) }
+  };
+  renderDiagnosticGroups(appliedRenderVersion);
+}
+function normalizeRuntimeImageAlt(value) {
+  return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
+}
+function settleImage(img, previewRoot, version, failed = false) {
+  if (!isCurrentPendingImage(img, previewRoot, version)) {
+    removePendingImageHandlers(img);
+    return;
+  }
+  if (!failed && img.naturalWidth > 0) {
+    removePendingImageHandlers(img);
+    img.setAttribute('data-image-state', 'loaded');
+    return;
+  }
+  if (!failed && !img.complete) return;
+
+  const target = img.getAttribute('data-format-target');
+  const alt = normalizeRuntimeImageAlt(img.alt);
+  removePendingImageHandlers(img);
+  const placeholder = document.createElement('figure');
+  placeholder.className = 'format-image-placeholder';
+  placeholder.setAttribute('data-image-state', 'load-failed');
+  placeholder.setAttribute('data-format-target', target);
+  placeholder.setAttribute('role', 'note');
+  placeholder.tabIndex = 0;
+  const caption = document.createElement('figcaption');
+  caption.textContent = `图片加载失败。请检查图片地址后重试。${alt ? ` 替代文本：${alt}` : ''}`;
+  placeholder.append(caption);
+  img.replaceWith(placeholder);
+  dynamicImageDiagnostics.push({
+    id: nextDynamicImageDiagnosticId(version),
+    code: 'IMAGE_LOAD_FAILED',
+    severity: 'advisory',
+    message: '图片加载失败，请检查图片地址后重试。',
+    targets: [{ kind: 'preview', id: target }]
+  });
+  renderDiagnosticGroups(version);
+}
+function attachPendingImageHandlers(previewRoot, version) {
+  for (const img of previewRoot.querySelectorAll('img[data-image-state="pending"]')) {
+    if (pendingImageHandlers.has(img)) continue;
+    const handlers = {
+      load: () => settleImage(img, previewRoot, version),
+      error: () => settleImage(img, previewRoot, version, true)
+    };
+    pendingImageHandlers.set(img, handlers);
+    img.addEventListener('load', handlers.load);
+    img.addEventListener('error', handlers.error);
+    if (img.complete) settleImage(img, previewRoot, version, img.naturalWidth === 0);
+  }
+}
+function applyRenderResult(rendered, detachedPreview, version) {
+  const currentPreview = $('#preview');
+  const nextPreview = currentPreview.cloneNode(false);
+  nextPreview.replaceChildren(...detachedPreview.childNodes);
+  applyPresentation(nextPreview, rendered.presentation);
+  staticDiagnostics = rendered.diagnostics;
+  dynamicImageDiagnostics = [];
+  renderBlocked = rendered.blocked;
+  appliedRenderVersion = version;
+  renderFresh = true;
+  currentPreview.replaceWith(nextPreview);
+  renderDiagnosticGroups(version);
+  syncRenderStatus('current');
+  attachPendingImageHandlers(nextPreview, version);
+}
+async function preview(version, snapshot) {
+  try {
+    const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot) });
+    if (!response.ok) {
+      if (isCurrentRenderRequest(version, snapshot)) markRenderStale();
+      return;
+    }
+    const rendered = await response.json();
+    if (!isCurrentRenderRequest(version, snapshot)) return;
+    const inertPreview = document.createElement('template');
+    inertPreview.innerHTML = typeof rendered?.html === 'string' ? rendered.html : '';
+    if (!isValidRenderResult(rendered, snapshot.body, inertPreview.content)) { markRenderStale(); return; }
+    applyRenderResult(rendered, inertPreview.content, version);
+  } catch {
+    if (isCurrentRenderRequest(version, snapshot)) markRenderStale();
+  }
+}
+function schedulePreview() {
+  markRenderChecking();
+  const version = ++previewVersion;
+  const snapshot = renderSnapshot();
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => { void preview(version, snapshot); }, 180);
+}
 async function save() {
   clearTimeout(saveTimer); saveTimer = undefined;
   if (saving) return savingPromise;
@@ -122,7 +514,20 @@ async function flushSave() {
   }
   return true;
 }
-for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+function recordDocumentChange() {
+  saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+}
+for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
+  if (name === 'body') {
+    if (controlledBodyInsertion) return;
+    clearRichTextAudit();
+  }
+  recordDocumentChange();
+});
+convertExternalLinks.addEventListener('change', () => {
+  documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
+  saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
 themeControls.theme.addEventListener('change', () => {
   documentModel.theme = themeControls.theme.value;
   syncThemeControls();
@@ -150,6 +555,27 @@ function preserveBlockBoundaries(markdown, snapshot, block) {
   const afterNewlines = after.match(/^\n*/)[0].length;
   return `${before ? '\n'.repeat(Math.max(0, 2 - beforeNewlines)) : ''}${markdown}${after ? '\n'.repeat(Math.max(0, 2 - afterNewlines)) : ''}`;
 }
+function insertTextAtSelection(text, snapshot, removed = []) {
+  const expectedBody = snapshot.body.slice(0, snapshot.start) + text + snapshot.body.slice(snapshot.end);
+  if (expectedBody === snapshot.body) return false;
+  let inserted = false;
+  controlledBodyInsertion = true;
+  try {
+    fields.body.focus();
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    inserted = document.execCommand('insertText', false, text);
+  } catch { inserted = false; }
+  finally { controlledBodyInsertion = false; }
+  if (!inserted || fields.body.value !== expectedBody) {
+    fields.body.value = snapshot.body;
+    documentModel.body = snapshot.body;
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    return false;
+  }
+  replaceRichTextAudit(removed, snapshot.start, text);
+  recordDocumentChange();
+  return true;
+}
 function noteSelectionChange() {
   if (activeRichPaste && (fields.body.selectionStart !== activeRichPaste.start || fields.body.selectionEnd !== activeRichPaste.end)) activeRichPaste.selectionChanged = true;
 }
@@ -173,6 +599,19 @@ for (const property of ['selectionStart', 'selectionEnd']) {
 fields.body.addEventListener('select', noteSelectionChange);
 document.addEventListener('selectionchange', noteSelectionChange);
 fields.body.addEventListener('paste', async event => {
+  const imageFile = [...(event.clipboardData?.files || [])].find(file => typeof file.type === 'string' && file.type.toLowerCase().startsWith('image/'));
+  if (imageFile) {
+    event.preventDefault();
+    const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd };
+    const placeholder = '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。';
+    const markdown = preserveBlockBoundaries(placeholder, snapshot, true);
+    if (!insertTextAtSelection(markdown, snapshot)) {
+      showRichTextMessage('浏览器无法安全插入图片占位。请手动输入图片占位。');
+      return;
+    }
+    showRichTextMessage('已插入本地图片占位，请上传图片后替换为 HTTPS 地址。');
+    return;
+  }
   const html = event.clipboardData?.getData('text/html')?.trim();
   if (!html) return;
   event.preventDefault();
@@ -185,15 +624,14 @@ fields.body.addEventListener('paste', async event => {
   try {
     const response = await fetch('/api/typesetting/rich-text', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ html }) });
     const result = await response.json();
-    if (!response.ok) throw result.error;
     if (snapshot.request !== richPasteVersion || snapshot.selectionChanged || changeVersion !== snapshot.changeVersion || fields.body.value !== snapshot.body || fields.body.selectionStart !== snapshot.start || fields.body.selectionEnd !== snapshot.end) {
       showRichTextMessage('正文或选区已变化，请重新粘贴后重试。');
       return;
     }
+    if (!response.ok) throw result.error;
+    if (!isValidRichTextResult(result)) throw { message: '富文本转换失败，请重试。', action: '服务返回了不完整的转换结果。' };
     const markdown = preserveBlockBoundaries(result.markdown, snapshot, result.block);
-    fields.body.focus();
-    fields.body.setSelectionRange(snapshot.start, snapshot.end);
-    if (!document.execCommand('insertText', false, markdown)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
+    if (!insertTextAtSelection(markdown, snapshot, result.removed)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
     showRichTextMessage(`已转换富文本${result.removed.length ? `，移除 ${result.removed.length} 项` : ''}${result.downgraded.length ? `，降级 ${result.downgraded.length} 项特殊内容` : ''}。`);
   } catch (error) { showRichTextMessage(richTextError(error)); }
   finally { if (activeRichPaste === snapshot) activeRichPaste = undefined; richPastePending = false; }
@@ -203,26 +641,54 @@ importForm.addEventListener('submit', async event => {
   event.preventDefault();
   const replacing = hasContent();
   if (replacing && !window.confirm('当前文稿已有内容，导入将替换现有文稿。是否继续？')) return;
+  richPasteVersion++;
+  if (activeRichPaste) activeRichPaste.selectionChanged = true;
   const button = importForm.querySelector('button');
   button.disabled = true;
+  convertExternalLinks.disabled = true;
   for (const input of Object.values(fields)) input.disabled = true;
   for (const control of Object.values(themeControls)) control.disabled = true;
   try {
     if (!await flushSave()) throw { message: '当前编辑未能保存，未开始导入。', action: '检查数据目录后继续编辑或重试保存。' };
+    const importSnapshot = {
+      changeVersion,
+      fields: Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value])),
+      convertExternalLinksToFootnotes: convertExternalLinks.checked,
+      theme: themeControls.theme.value,
+      settings: Object.fromEntries(themeSettingNames.map(name => [name, themeControls[name].value]))
+    };
     importMessage.textContent = '正在读取文章…';
     const response = await fetch('/api/typesetting/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: importUrl.value, revision: documentModel.revision, confirmed: replacing }) });
     const result = await response.json();
     if (!response.ok) throw result.error || { message: '导入失败，请重试。' };
+    if (!isCompleteDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
+    const inputsUnchanged = changeVersion === importSnapshot.changeVersion
+      && Object.entries(fields).every(([name, input]) => input.value === importSnapshot.fields[name])
+      && convertExternalLinks.checked === importSnapshot.convertExternalLinksToFootnotes
+      && themeControls.theme.value === importSnapshot.theme
+      && themeSettingNames.every(name => themeControls[name].value === importSnapshot.settings[name]);
+    if (!inputsUnchanged) {
+      dirty = true;
+      setStatus('未保存', '导入期间文稿已变化，服务端结果未覆盖本地编辑。请重新载入后手动合并。');
+      throw { message: '导入期间文稿已变化，未应用服务端结果。', action: '本地编辑仍保留；服务器可能已完成导入，请重新载入后手动合并。' };
+    }
     clearTimeout(saveTimer);
     dirty = false;
-    if (!hydrateDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
-    for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
-    syncThemeControls();
+    hydrateDocument(result.document, true);
     schedulePreview();
     setStatus('已保存');
     importMessage.textContent = '文章已导入，可继续编辑。';
   } catch (error) { showImportMessage(error); }
-  finally { button.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
+  finally { button.disabled = false; convertExternalLinks.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
 });
-async function start() { const response = await fetch('/api/typesetting/document'); if (response.ok) hydrateDocument((await response.json()).document); for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || ''; syncThemeControls(); void preview(++previewVersion); }
+async function start() {
+  try {
+    const response = await fetch('/api/typesetting/document');
+    if (response.ok) hydrateDocument((await response.json()).document, true);
+  } catch { /* Keep the complete default document and continue with an initial render. */ }
+  hydrateDocument(documentModel, true);
+  markRenderChecking();
+  const version = ++previewVersion;
+  void preview(version, renderSnapshot());
+}
 void start();

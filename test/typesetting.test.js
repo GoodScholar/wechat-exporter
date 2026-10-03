@@ -53,9 +53,10 @@ const answer = 42;
 | 单元格 A | 单元格 B |`;
 
 test('三套主题对代表性 Markdown 生成完全相同的语义 HTML', () => {
-  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown(representativeMarkdown, {
-    theme,
-    settings: expectedThemeSettings[theme]
+  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown({
+    body: representativeMarkdown,
+    presentation: { theme, settings: expectedThemeSettings[theme] },
+    convertExternalLinksToFootnotes: false
   }));
   assert.ok(renders[0].html.includes('<h1>一级标题</h1>'));
   assert.ok(renders[0].html.includes('<table>'));
@@ -81,6 +82,7 @@ test('预览 API 拒绝顶层 customCss', async () => {
       body: representativeMarkdown,
       theme: 'default',
       settings: expectedThemeSettings.default,
+      convertExternalLinksToFootnotes: false,
       customCss: 'body{display:none}'
     });
     assert.equal(response.status, 400);
@@ -92,18 +94,18 @@ test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值'
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
   try {
     const settings = { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' };
-    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings });
+    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings, convertExternalLinksToFootnotes: false });
     assert.equal(accepted.status, 200);
     const payload = await accepted.json();
     assert.deepEqual(payload.presentation, { theme: 'grace', settings });
-    assert.deepEqual(Object.keys(payload).sort(), ['html', 'presentation']);
+    assert.deepEqual(Object.keys(payload).sort(), ['blocked', 'diagnostics', 'html', 'presentation']);
 
     const invalidPresentations = [
-      { body: representativeMarkdown, theme: 'unknown', settings },
-      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' } }
+      { body: representativeMarkdown, theme: 'unknown', settings, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' }, convertExternalLinksToFootnotes: false }
     ];
     for (const body of invalidPresentations) assert.equal((await post(server.base, '/api/typesetting/render', body)).status, 400);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
@@ -120,7 +122,7 @@ test('三套主题样式全部作用域化且不加载外部资源', async () =>
   assert.doesNotMatch(css, /(^|,|})\s*(?:h[1-6]|p|blockquote|ul|ol|li|pre|code|img|a|hr|table|th|td)\b/m);
 });
 
-test('第三方说明记录三套主题、设置来源、固定提交和许可证', async () => {
+test('第三方说明记录主题与 doocs 脚注最小移植来源许可和偏离', async () => {
   const notices = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
   for (const source of [
     'packages/shared/src/configs/theme-css/default.css',
@@ -128,10 +130,18 @@ test('第三方说明记录三套主题、设置来源、固定提交和许可�
     'packages/shared/src/configs/theme-css/simple.css',
     'packages/shared/src/configs/style.ts',
     'apps/web/src/stores/theme.ts',
+    'packages/core/src/renderer/renderer-impl.ts',
+    'addFootnote()',
+    'buildFootnoteArray()',
+    'buildFootnotes()',
+    'renderer.link()',
+    'src/typesetting-render.js',
     'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
     'WTFPL v2'
   ]) assert.match(notices, new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(notices, /主色|字号|行距|段间距/);
+  assert.match(notices, /URL parser|bare URL|sanitize-html/);
+  assert.doesNotMatch(notices, /No upstream source file is copied or vendored/);
 });
 
 test('浏览器原生撤销快捷键按宿主平台映射', () => {
@@ -153,13 +163,14 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     const initial = await (await fetch(server.base + '/api/typesetting/document')).json();
     assert.deepEqual(initial.document, {
       title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '',
-      theme: 'default', themeSettings: expectedThemeSettings
+      theme: 'default', themeSettings: expectedThemeSettings, convertExternalLinksToFootnotes: false
     });
     const unsafe = '# 标题\n\n<script>alert(1)</script><img src="javascript:alert(1)" onerror="alert(2)">\n\n[危险](javascript:alert(3))';
     const preview = await (await post(server.base, '/api/typesetting/render', {
       body: unsafe,
       theme: 'default',
-      settings: expectedThemeSettings.default
+      settings: expectedThemeSettings.default,
+      convertExternalLinksToFootnotes: false
     })).json();
     assert.match(preview.html, /<h1/);
     assert.doesNotMatch(preview.html, /script|onerror|javascript:/i);
@@ -216,7 +227,7 @@ test('旧排版文稿补齐三套默认主题并在下次保存后跨重启持�
     await mkdir(store.dataDir, { recursive: true });
     await writeFile(store.file, JSON.stringify(legacy), 'utf8');
     const migrated = await store.load();
-    assert.deepEqual(migrated, { ...legacy, theme: 'default', themeSettings: expectedThemeSettings });
+    assert.deepEqual(migrated, { ...legacy, theme: 'default', themeSettings: expectedThemeSettings, convertExternalLinksToFootnotes: false });
 
     const saved = await store.save({ ...migrated, revision: 2 });
     assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved);
@@ -315,6 +326,123 @@ test('主题设置写入失败时旧配置仍是内存和重启后的唯一可�
       assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved, phase);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
+});
+
+test('旧文稿默认关闭外链脚注并在下次保存后跨重启持久化', async () => {
+  for (const source of ['current-version', 'recovery-version', 'legacy-current', 'legacy-backup']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-migration-'));
+    const store = new TypesettingStore(path.join(root, '.data'));
+    const legacy = documentWithTheme({ title: `expected-${source}`, body: `expected-body-${source}`, revision: 0, savedAt: '' });
+    const decoy = documentWithTheme({ title: `decoy-${source}`, body: `decoy-body-${source}`, revision: 0, savedAt: '' });
+    try {
+      await mkdir(store.dataDir, { recursive: true });
+      if (source === 'current-version' || source === 'recovery-version') {
+        await mkdir(store.versions, { recursive: true });
+        await writeFile(path.join(store.versions, 'current.json'), source === 'current-version' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
+        await writeFile(path.join(store.versions, 'recovery.json'), JSON.stringify(source === 'current-version' ? decoy : legacy), 'utf8');
+        await writeFile(store.manifest, JSON.stringify({ current: 'current', recovery: 'recovery' }), 'utf8');
+      } else {
+        await writeFile(store.file, source === 'legacy-current' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
+        await writeFile(store.backup, JSON.stringify(source === 'legacy-current' ? decoy : legacy), 'utf8');
+      }
+
+      const migrated = await store.load();
+      assert.equal(migrated.title, legacy.title, source);
+      assert.equal(migrated.body, legacy.body, source);
+      assert.equal(migrated.convertExternalLinksToFootnotes, false, source);
+      assert.equal(migrated.revision, 0, source);
+      const saved = await store.save({ ...migrated, convertExternalLinksToFootnotes: true, revision: 1 });
+      assert.equal(saved.convertExternalLinksToFootnotes, true, source);
+      assert.equal((await new TypesettingStore(store.dataDir).load()).convertExternalLinksToFootnotes, true, source);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('外链脚注开关参与内容相等、revision 冲突和幂等判断', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-revision-'));
+  const store = new TypesettingStore(path.join(root, '.data'));
+  try {
+    const saved = await store.save(documentWithTheme({ convertExternalLinksToFootnotes: false }));
+    assert.equal(await store.save({ ...saved }), saved);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true }), error => error.status === 409);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 0 }), error => error.status === 409);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: 'true', revision: 2 }), error => error.status === 400);
+
+    const enabled = await store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 2 });
+    assert.equal(enabled.convertExternalLinksToFootnotes, true);
+    assert.equal(await store.save({ ...enabled }), enabled);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('外链脚注开关写入任一提交阶段失败时旧值仍唯一可见', async () => {
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-write-failure-'));
+    let failWrites = false;
+    let candidateWrites = 0;
+    const writeAtomically = async (file, text) => {
+      if (failWrites && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if (phase === 'current-version' && candidateWrites === 1 || phase === 'recovery-version' && candidateWrites === 2) throw new Error('disk denied');
+      }
+      if (failWrites && phase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
+      await writeFile(file, text, 'utf8');
+    };
+    const store = new TypesettingStore(path.join(root, '.data'), { writeAtomically });
+    try {
+      const saved = await store.save(documentWithTheme({ convertExternalLinksToFootnotes: false }));
+      const manifest = JSON.parse(await readFile(store.manifest, 'utf8'));
+      const persisted = {
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      };
+      failWrites = true;
+      candidateWrites = 0;
+      await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 2 }), /disk denied/);
+      assert.deepEqual({
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      }, persisted, phase);
+      assert.equal((await store.load()).convertExternalLinksToFootnotes, false, phase);
+      assert.equal((await new TypesettingStore(store.dataDir).load()).convertExternalLinksToFootnotes, false, phase);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('工作台预览请求只采用完整水合文稿中的外链脚注布尔值', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-hydration-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  const renderRequestFor = async document => {
+    const page = await browser.newPage();
+    let receiveRequest;
+    const requestReceived = new Promise(resolve => { receiveRequest = resolve; });
+    await page.route('**/api/typesetting/document', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ document })
+    }));
+    await page.route('**/api/typesetting/render', route => {
+      const request = route.request().postDataJSON();
+      receiveRequest(request);
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ html: '<p>预览</p>', presentation: { theme: request.theme, settings: request.settings }, diagnostics: [], blocked: false })
+      });
+    });
+    await page.goto(server.base + '/typesetting');
+    const request = await requestReceived;
+    await page.close();
+    return request;
+  };
+  try {
+    const baseDocument = {
+      title: '', author: '', account: '', publishedAt: '', body: '正文', revision: 0, savedAt: '',
+      theme: 'default', themeSettings: expectedThemeSettings
+    };
+    assert.equal((await renderRequestFor({ ...baseDocument, convertExternalLinksToFootnotes: 'true' })).convertExternalLinksToFootnotes, false);
+    assert.equal((await renderRequestFor({ ...baseDocument, convertExternalLinksToFootnotes: true })).convertExternalLinksToFootnotes, true);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('慢的旧预览响应不能覆盖较新的预览', async () => {
@@ -712,6 +840,18 @@ async function dispatchPaste(page, { html = '', text = '' }) {
   }, { html, text });
 }
 
+async function dispatchImagePaste(page, { name = 'paste.png', type = 'image/png', html = '' } = {}) {
+  return page.evaluate(({ name, type, html }) => {
+    const clipboard = new DataTransfer();
+    clipboard.items.add(new File(['not-read-by-the-app'], name, { type }));
+    if (html) clipboard.setData('text/html', html);
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard });
+    const body = document.querySelector('#document-body');
+    body.dispatchEvent(event);
+    return { defaultPrevented: event.defaultPrevented, value: body.value };
+  }, { name, type, html });
+}
+
 test('纯文本粘贴保持原生路径；富文本确认后按触发选区插入并自动保存', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-rich-paste-ui-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
@@ -947,5 +1087,36 @@ test('富文本插入进入原生撤销栈，转义标签不触发外部资源�
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙丙');
     await page.keyboard.press(historyShortcut(process.platform, true));
     assert.match(await page.getByLabel('Markdown 正文').inputValue(), /tracker\.invalid/);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('剪贴板 image File 插入 local-binary 规范占位支持原生撤销且不创建 blob URL', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-image-file-paste-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    const page = await browser.newPage();
+    await page.addInitScript(() => {
+      window.__createObjectUrlCalls = 0;
+      const original = URL.createObjectURL.bind(URL);
+      URL.createObjectURL = value => { window.__createObjectUrlCalls++; return original(value); };
+    });
+    let conversionRequests = 0;
+    await page.route('**/api/typesetting/rich-text', route => { conversionRequests++; return route.abort(); });
+    await page.goto(server.base + '/typesetting');
+    await page.getByLabel('Markdown 正文').fill('甲乙');
+    await page.getByLabel('Markdown 正文').evaluate(input => input.setSelectionRange(1, 1));
+    const result = await dispatchImagePaste(page, { name: '危险*[文件].png', html: '<strong>不得走富文本</strong>' });
+    assert.equal(result.defaultPrevented, true);
+    const canonical = '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。';
+    await page.waitForFunction(expected => document.querySelector('#document-body').value === expected, `甲\n\n${canonical}\n\n乙`);
+    assert.equal(await page.evaluate(() => window.__createObjectUrlCalls), 0);
+    assert.equal(conversionRequests, 0);
+    assert.doesNotMatch(await page.getByLabel('Markdown 正文').inputValue(), /危险|data:|blob:/);
+    await page.getByLabel('Markdown 正文').focus();
+    await page.keyboard.press(historyShortcut(process.platform));
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '甲乙');
+    await page.keyboard.press(historyShortcut(process.platform, true));
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), `甲\n\n${canonical}\n\n乙`);
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
