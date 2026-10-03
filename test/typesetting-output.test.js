@@ -201,13 +201,34 @@ test('输出依赖和共享 Markdown fixture 固定版本与完整 artifact shap
 
 test('第三方 notice 精确记录 doocs 三 helper 与 Juice 固定版本许可边界', async () => {
   const notice = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
+  assert.match(notice, /a7c17fc4cda92e3c13aa7e24f06615cfa4219b31/u);
+  assert.match(notice, /WTFPL/u);
+
+  const sourceRows = [
+    {
+      upstream: 'apps/web/src/services/export/clipboard-dom.ts',
+      local: 'src/typesetting-output.js',
+      responsibilities: ['Copied and adapted only', 'solveWeChatImage()', 'modifyHtmlStructure()', 'createEmptyNode()']
+    },
+    {
+      upstream: 'apps/web/src/services/export/clipboard.ts',
+      local: 'src/typesetting-output.js',
+      responsibilities: ['safe DOM', 'Juice', 'compatibility fix', 'un-inlined fallback', 'active deviation']
+    },
+    {
+      upstream: 'apps/web/src/lib/browser/clipboard.ts',
+      local: 'public/typesetting.js',
+      responsibilities: ['Behavior reference only', 'ClipboardItem', 'clipboard.write()', 'dual MIME', 'plain-text fallback', 'legacy fallback', 'not copied']
+    }
+  ];
+  for (const { upstream, local, responsibilities } of sourceRows) {
+    const row = notice.split('\n').find(line => line.includes(`\`${upstream}\``));
+    assert.ok(row, `notice 应包含完整上游路径 ${upstream}`);
+    for (const token of [local, ...responsibilities]) assert.ok(row.includes(token), `${upstream} 行应包含 ${token}`);
+  }
+
+  const juiceNotice = notice.split('## Juice')[1] || '';
   for (const token of [
-    'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
-    'WTFPL',
-    'solveWeChatImage',
-    'modifyHtmlStructure',
-    'createEmptyNode',
-    'src/typesetting-output.js',
     '11.0.3',
     'ce15687713507252813744b0daaa70d4549527d1',
     'MIT',
@@ -216,9 +237,19 @@ test('第三方 notice 精确记录 doocs 三 helper 与 Juice 固定版本许�
     'string public API',
     'juiceResources()',
     'juiceFile()',
-    'active deviation',
     'fallback'
-  ]) assert.match(notice, new RegExp(token.replace(/[.*+?^${}()|[\]\\]/gu, '\\$&'), 'u'));
+  ]) assert.ok(juiceNotice.includes(token), `Juice notice 应包含 ${token}`);
+
+  const juicePackage = await readJson('../node_modules/juice/package.json');
+  assert.equal(juicePackage.version, '11.0.3');
+  assert.equal(juicePackage.license, 'MIT');
+  assert.equal(juicePackage.engines.node, '>=18.17');
+  if (Object.hasOwn(juicePackage, 'gitHead')) {
+    assert.equal(juicePackage.gitHead, 'ce15687713507252813744b0daaa70d4549527d1');
+  }
+  const juiceLicense = await readFile(new URL('../node_modules/juice/LICENSE.md', import.meta.url), 'utf8');
+  assert.match(juiceLicense, /^# MIT License$/mu);
+  assert.match(juiceLicense, /Copyright \(c\) 2021 Automattic/u);
 
   assert.match(notice, /Clipboard API[\s\S]*Blob[\s\S]*object URL[\s\S]*browser standards/iu);
   assert.match(notice, /not copied the complete doocs clipboard\s+pipeline/iu);

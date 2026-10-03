@@ -20,7 +20,8 @@ as behaviour and structure references:
 | `packages/shared/src/configs/style.ts` | `src/typesetting.js`, `public/typesetting-theme.css` | Adapted the bounded presentation handoff and the four local CSS variables: 主色、字号、行距、段间距. |
 | `apps/web/src/stores/theme.ts` | `src/typesetting.js` | Adapted only fixed theme names and per-theme settings validation; no client store is copied. |
 | `apps/web/src/services/export/clipboard-dom.ts` | `src/typesetting-output.js` | Copied and adapted only `solveWeChatImage()`, `modifyHtmlStructure()` and `createEmptyNode()`. The server-side adaptations use Cheerio, restrict conditionally reachable image dimensions to the local style allowlist, preserve the relative order of multiple nested lists, and keep clipboard boundary nodes out of plain text and full HTML. |
-| `apps/web/src/services/export/clipboard.ts` | `src/typesetting-output.js`, `public/typesetting.js` | Read only as a reference for the safe DOM → CSS inlining → compatibility fix → dual-MIME order. The browser DOM clone, complete clipboard pipeline and fallback behavior were not copied. |
+| `apps/web/src/services/export/clipboard.ts` | `src/typesetting-output.js` | Behavior reference only for the safe DOM → Juice inlining → compatibility fix order. Its un-inlined fallback was not copied; failing the whole rich output instead is an active deviation. |
+| `apps/web/src/lib/browser/clipboard.ts` | `public/typesetting.js` | Behavior reference only for one dual MIME `ClipboardItem` passed to `clipboard.write()`. The browser wrapper was not copied, and neither the plain-text fallback nor legacy fallback success semantics are accepted. |
 
 The footnote adaptation deliberately differs from upstream: it normalizes and
 classifies links with the platform URL parser, uses an exact HTTPS WeChat
