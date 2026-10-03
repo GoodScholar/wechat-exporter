@@ -36,6 +36,7 @@ const pendingImageHandlers = new WeakMap();
 let richPastePending = false;
 let richPasteVersion = 0;
 let activeRichPaste;
+let controlledBodyInsertion = false;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
 function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked; }
@@ -144,7 +145,7 @@ function isValidStructuredDowngrade(value) {
 }
 function isValidRichTextResult(value) {
   return hasExactKeys(value, ['markdown', 'removed', 'downgraded', 'block'])
-    && typeof value.markdown === 'string' && Array.isArray(value.removed)
+    && typeof value.markdown === 'string' && value.markdown.trim() !== '' && Array.isArray(value.removed)
     && new Set(value.removed).size === value.removed.length
     && value.removed.every(type => safeRemovedTypes.includes(type))
     && Array.isArray(value.downgraded) && value.downgraded.every(isValidStructuredDowngrade)
@@ -434,9 +435,15 @@ async function flushSave() {
   }
   return true;
 }
-for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
-  if (name === 'body') clearRichTextAudit();
+function recordDocumentChange() {
   saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+}
+for (const [name, input] of Object.entries(fields)) input.addEventListener('input', () => {
+  if (name === 'body') {
+    if (controlledBodyInsertion) return;
+    clearRichTextAudit();
+  }
+  recordDocumentChange();
 });
 convertExternalLinks.addEventListener('change', () => {
   documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
@@ -469,10 +476,25 @@ function preserveBlockBoundaries(markdown, snapshot, block) {
   const afterNewlines = after.match(/^\n*/)[0].length;
   return `${before ? '\n'.repeat(Math.max(0, 2 - beforeNewlines)) : ''}${markdown}${after ? '\n'.repeat(Math.max(0, 2 - afterNewlines)) : ''}`;
 }
-function insertTextAtSelection(text, start, end) {
-  fields.body.focus();
-  fields.body.setSelectionRange(start, end);
-  return document.execCommand('insertText', false, text);
+function insertTextAtSelection(text, snapshot, removed = []) {
+  const expectedBody = snapshot.body.slice(0, snapshot.start) + text + snapshot.body.slice(snapshot.end);
+  if (expectedBody === snapshot.body) return false;
+  let inserted = false;
+  controlledBodyInsertion = true;
+  try {
+    fields.body.focus();
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    inserted = document.execCommand('insertText', false, text);
+  } finally { controlledBodyInsertion = false; }
+  if (!inserted || fields.body.value !== expectedBody) {
+    fields.body.value = snapshot.body;
+    documentModel.body = snapshot.body;
+    fields.body.setSelectionRange(snapshot.start, snapshot.end);
+    return false;
+  }
+  replaceRichTextAudit(removed, snapshot.start, text);
+  recordDocumentChange();
+  return true;
 }
 function noteSelectionChange() {
   if (activeRichPaste && (fields.body.selectionStart !== activeRichPaste.start || fields.body.selectionEnd !== activeRichPaste.end)) activeRichPaste.selectionChanged = true;
@@ -503,7 +525,7 @@ fields.body.addEventListener('paste', async event => {
     const snapshot = { body: fields.body.value, start: fields.body.selectionStart, end: fields.body.selectionEnd };
     const placeholder = '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。';
     const markdown = preserveBlockBoundaries(placeholder, snapshot, true);
-    if (!insertTextAtSelection(markdown, snapshot.start, snapshot.end)) {
+    if (!insertTextAtSelection(markdown, snapshot)) {
       showRichTextMessage('浏览器无法安全插入图片占位。请手动输入图片占位。');
       return;
     }
@@ -529,8 +551,7 @@ fields.body.addEventListener('paste', async event => {
     if (!response.ok) throw result.error;
     if (!isValidRichTextResult(result)) throw { message: '富文本转换失败，请重试。', action: '服务返回了不完整的转换结果。' };
     const markdown = preserveBlockBoundaries(result.markdown, snapshot, result.block);
-    if (!insertTextAtSelection(markdown, snapshot.start, snapshot.end)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
-    replaceRichTextAudit(result.removed, snapshot.start, markdown);
+    if (!insertTextAtSelection(markdown, snapshot, result.removed)) throw { message: '浏览器无法安全插入转换后的富文本。', action: '请复制 Markdown 后手动粘贴。' };
     showRichTextMessage(`已转换富文本${result.removed.length ? `，移除 ${result.removed.length} 项` : ''}${result.downgraded.length ? `，降级 ${result.downgraded.length} 项特殊内容` : ''}。`);
   } catch (error) { showRichTextMessage(richTextError(error)); }
   finally { if (activeRichPaste === snapshot) activeRichPaste = undefined; richPastePending = false; }
@@ -540,6 +561,8 @@ importForm.addEventListener('submit', async event => {
   event.preventDefault();
   const replacing = hasContent();
   if (replacing && !window.confirm('当前文稿已有内容，导入将替换现有文稿。是否继续？')) return;
+  richPasteVersion++;
+  if (activeRichPaste) activeRichPaste.selectionChanged = true;
   const button = importForm.querySelector('button');
   button.disabled = true;
   convertExternalLinks.disabled = true;
@@ -547,13 +570,31 @@ importForm.addEventListener('submit', async event => {
   for (const control of Object.values(themeControls)) control.disabled = true;
   try {
     if (!await flushSave()) throw { message: '当前编辑未能保存，未开始导入。', action: '检查数据目录后继续编辑或重试保存。' };
+    const importSnapshot = {
+      changeVersion,
+      fields: Object.fromEntries(Object.entries(fields).map(([name, input]) => [name, input.value])),
+      convertExternalLinksToFootnotes: convertExternalLinks.checked,
+      theme: themeControls.theme.value,
+      settings: Object.fromEntries(themeSettingNames.map(name => [name, themeControls[name].value]))
+    };
     importMessage.textContent = '正在读取文章…';
     const response = await fetch('/api/typesetting/import', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ url: importUrl.value, revision: documentModel.revision, confirmed: replacing }) });
     const result = await response.json();
     if (!response.ok) throw result.error || { message: '导入失败，请重试。' };
+    if (!isCompleteDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
+    const inputsUnchanged = changeVersion === importSnapshot.changeVersion
+      && Object.entries(fields).every(([name, input]) => input.value === importSnapshot.fields[name])
+      && convertExternalLinks.checked === importSnapshot.convertExternalLinksToFootnotes
+      && themeControls.theme.value === importSnapshot.theme
+      && themeSettingNames.every(name => themeControls[name].value === importSnapshot.settings[name]);
+    if (!inputsUnchanged) {
+      dirty = true;
+      setStatus('未保存', '导入期间文稿已变化，服务端结果未覆盖本地编辑。请重新载入后手动合并。');
+      throw { message: '导入期间文稿已变化，未应用服务端结果。', action: '本地编辑仍保留；服务器可能已完成导入，请重新载入后手动合并。' };
+    }
     clearTimeout(saveTimer);
     dirty = false;
-    if (!hydrateDocument(result.document, true)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
+    hydrateDocument(result.document, true);
     schedulePreview();
     setStatus('已保存');
     importMessage.textContent = '文章已导入，可继续编辑。';

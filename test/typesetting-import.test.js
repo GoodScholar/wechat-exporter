@@ -644,6 +644,121 @@ test('导入期间脚注开关禁用恢复且成功失败都保留原选择', as
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('挂起富文本响应在导入开始后失效且不得插入或覆盖旧审计', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-rich-race-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    let richRequests = 0;
+    let releaseRich;
+    let secondRichReached;
+    await page.route('**/api/typesetting/rich-text', async route => {
+      richRequests++;
+      if (richRequests === 2) {
+        secondRichReached();
+        await new Promise(resolve => { releaseRich = resolve; });
+        return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ markdown: '不得插入', removed: ['style'], downgraded: [], block: false }) });
+      }
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ markdown: '建立审计', removed: ['script'], downgraded: [], block: false }) });
+    });
+    let releaseImport;
+    let importReached;
+    await page.route('**/api/typesetting/import', async route => {
+      importReached();
+      await new Promise(resolve => { releaseImport = resolve; });
+      return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { message: '固定导入失败' } }) });
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.evaluate(() => {
+      window.confirm = () => true;
+      const native = document.execCommand.bind(document);
+      window.__nativeExecCommandForImportRace = native;
+      document.execCommand = (command, _ui, value) => {
+        if (command !== 'insertText') return native(command, _ui, value);
+        const body = document.querySelector('#document-body');
+        body.setRangeText(value, body.selectionStart, body.selectionEnd, 'end');
+        body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+        return true;
+      };
+    });
+    const paste = html => page.evaluate(value => {
+      const body = document.querySelector('#document-body');
+      const data = new DataTransfer();
+      data.setData('text/html', value);
+      body.dispatchEvent(new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: data }));
+    }, html);
+    await page.getByLabel('Markdown 正文').evaluate(body => body.setSelectionRange(body.value.length, body.value.length));
+    await paste('<p>建立审计</p>');
+    const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+    await audit.waitFor();
+    const auditId = await audit.getAttribute('data-diagnostic-id');
+    await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+    const bodyBefore = await page.getByLabel('Markdown 正文').inputValue();
+
+    const richPending = new Promise(resolve => { secondRichReached = resolve; });
+    await page.getByLabel('Markdown 正文').evaluate(body => body.setSelectionRange(body.value.length, body.value.length));
+    await paste('<p>不得插入</p>');
+    await richPending;
+    const importPending = new Promise(resolve => { importReached = resolve; });
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await importPending;
+    releaseRich();
+    await page.getByText('正文或选区已变化', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), bodyBefore);
+    assert.equal(await audit.getAttribute('data-diagnostic-id'), auditId);
+    assert.doesNotMatch(await page.locator('#rich-text-message').textContent(), /已转换富文本/);
+    releaseImport();
+    await page.getByText('固定导入失败', { exact: false }).waitFor();
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('导入成功响应遇到本地版本漂移不覆盖输入且保留自动保存冲突', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-version-drift-'));
+  const dataDir = path.join(root, '.data');
+  const server = await serve(createApp({ dataDir, interval: 0, fetchArticle: async () => articleHtml }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  try {
+    await seed(server.base);
+    const page = await fixturePage(browser);
+    let releaseImportResponse;
+    let serverImportCommitted;
+    await page.route('**/api/typesetting/import', async route => {
+      const response = await route.fetch();
+      serverImportCommitted();
+      await new Promise(resolve => { releaseImportResponse = resolve; });
+      await route.fulfill({ response });
+    });
+    let saveRequests = 0;
+    await page.route('**/api/typesetting/document', async route => {
+      if (route.request().method() === 'POST') saveRequests++;
+      await route.continue();
+    });
+    await page.goto(server.base + '/typesetting');
+    await page.evaluate(() => { window.confirm = () => true; });
+    await page.getByLabel('导入公众号文章链接').fill(articleUrl);
+    const committed = new Promise(resolve => { serverImportCommitted = resolve; });
+    await page.getByRole('button', { name: '导入文章' }).click();
+    await committed;
+
+    await page.getByLabel('Markdown 正文').evaluate(body => {
+      body.value = '导入期间本地新正文';
+      body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: '导入期间本地新正文' }));
+    });
+    await page.waitForTimeout(900);
+    assert.ok(saveRequests >= 1, '导入期间产生的本地 input 必须继续触发自动保存');
+    await page.getByText('未保存', { exact: true }).waitFor();
+
+    releaseImportResponse();
+    await page.locator('#import-message').getByText('导入期间文稿已变化', { exact: false }).waitFor();
+    assert.equal(await page.getByLabel('Markdown 正文').inputValue(), '导入期间本地新正文');
+    assert.equal(await page.getByText('未保存', { exact: true }).count(), 1);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
 test('仅排版页 CSP 允许 self 与 HTTPS 图片并拒绝 http data blob', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-csp-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));

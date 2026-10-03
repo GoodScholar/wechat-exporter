@@ -795,6 +795,14 @@ test('成功下一次粘贴替换旧审计而失败过期选区正文竞态保�
   assert.equal(await audit.getAttribute('data-diagnostic-id'), firstId);
   await page.evaluate(() => { document.execCommand = window.__nativeExecCommand; });
 
+  await page.evaluate(() => { window.__nativeExecCommand = document.execCommand; document.execCommand = () => true; });
+  response = richResult({ markdown: '伪成功', removed: ['style'], downgraded: [], block: false });
+  await dispatchHtmlPaste(page, '<p>伪成功</p>');
+  await page.getByText('浏览器无法安全插入', { exact: false }).waitFor();
+  assert.equal(await page.getByLabel('Markdown 正文').inputValue(), beforeFailedInsertion);
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), firstId);
+  await page.evaluate(() => { document.execCommand = window.__nativeExecCommand; });
+
   response = 'held';
   await dispatchHtmlPaste(page, '<p>过期</p>');
   await page.waitForTimeout(30);
@@ -815,7 +823,11 @@ test('客户端拒绝额外键重复 removed 未知 downgrade 和不安全 sourc
   const { page, base } = await withBrowser(t);
   await installRenderFixture(page, request => ({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }));
   let payload = richResult({ markdown: '基准', removed: ['script'], downgraded: [], block: false });
-  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) }));
+  let responseCount = 0;
+  await page.route('**/api/typesetting/rich-text', route => {
+    responseCount++;
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) });
+  });
   await page.goto(base() + '/typesetting');
   await page.getByLabel('Markdown 正文').fill('甲乙');
   await page.evaluate(() => { window.confirm = () => true; document.querySelector('#document-body').setSelectionRange(1, 1); });
@@ -826,6 +838,8 @@ test('客户端拒绝额外键重复 removed 未知 downgrade 和不安全 sourc
 
   const invalid = [
     { ...richResult(), extra: true },
+    richResult({ markdown: '' }),
+    richResult({ markdown: ' \n\t ' }),
     richResult({ markdown: null }),
     richResult({ block: 1 }),
     richResult({ removed: 'script' }),
@@ -842,8 +856,11 @@ test('客户端拒绝额外键重复 removed 未知 downgrade 和不安全 sourc
     payload = candidate;
     const before = await page.getByLabel('Markdown 正文').inputValue();
     const beforeChecks = await page.locator('#format-checks').innerHTML();
+    const expectedResponseCount = responseCount + 1;
+    await page.evaluate(() => { document.querySelector('#rich-text-message').textContent = ''; });
     await page.evaluate(() => document.querySelector('#document-body').setSelectionRange(1, 1));
     await dispatchHtmlPaste(page, '<p>畸形</p>');
+    while (responseCount < expectedResponseCount) await page.waitForTimeout(10);
     await page.getByText('富文本转换失败', { exact: false }).waitFor();
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), before);
     assert.equal(await page.locator('#format-checks').innerHTML(), beforeChecks);
