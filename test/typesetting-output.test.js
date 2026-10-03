@@ -757,6 +757,37 @@ test('style value 按 property 拒绝错配关键字隐藏内容和非有限巨�
   assert.equal(combinations, 4125);
 });
 
+test('style 校验绑定当前 presentation 并拒绝跨主题跨设置 stale 声明', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const staleStyles = [
+    {
+      body: '<h1>正文</h1>',
+      mutate: html => html.replace('<h1>', '<h1 style="color:#FA5151">')
+    },
+    {
+      body: '<h1>正文</h1>',
+      mutate: html => html.replace('<h1>', '<h1 style="padding-left:.6em">')
+    },
+    {
+      body: '<p>正文</p>',
+      mutate: html => html.replace(/style="[^"]*"/u, 'style="font:18px/2.05 \'PingFang SC\', \'Microsoft YaHei\', sans-serif"')
+    },
+    {
+      body: '<h1>正文</h1>',
+      mutate: html => html.replace('<h1>', '<h1 style="margin:calc(1.8em * 1.35) 0 calc(.8em * 1.35)">')
+    }
+  ];
+
+  for (const { body, mutate } of staleStyles) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, body),
+      inlineCss: mutate,
+      themeCss: ''
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+  }
+});
+
 test('clipboard doocs 修正、图片安全样式、边界与 plain text 共享同一修正后正文', async () => {
   const { buildTypesettingOutput, createTypesettingOutputBuilder } = await loadOutputModule();
   const nested = '<ul><li>甲<ul><li>乙</li></ul><ol><li>丙</li></ol></li></ul>';
@@ -892,6 +923,24 @@ test('plain text 将块容器中行内语义兄弟间的换行空白保留为单
 
   assert.equal(bundle.status, 'ready');
   assert.equal(bundle.clipboard.plain.content, ['甲 乙', '丙 丁', '戊 己', '', '庚 辛'].join('\n'));
+});
+
+test('plain text 在 inline 与段落列表表格块边界输出 LF', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: [
+        '<strong>甲</strong><p>乙</p>',
+        '<em>丙</em><ul><li>丁</li></ul>',
+        '<span>戊</span><table><tbody><tr><td>己</td></tr></tbody></table>',
+        '<p>庚</p><strong>辛</strong><p>壬</p>'
+      ].join('')
+    }
+  }));
+
+  assert.equal(bundle.status, 'ready');
+  assert.equal(bundle.clipboard.plain.content, ['甲', '乙', '丙', '- 丁', '戊', '己', '庚', '辛', '壬'].join('\n'));
 });
 
 test('完整 HTML 有固定安全文档壳四项元信息和同一 canonical 正文', async () => {
