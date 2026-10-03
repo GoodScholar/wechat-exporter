@@ -16,6 +16,7 @@
 - 不扩展四键 `RenderResult`：`{ html, presentation, diagnostics, blocked }`；格式检查 UI 继续只消费 `/api/typesetting/render` 的 diagnostics。
 - `POST /api/typesetting/output` 顶层恰好四键；成功 `OutputBundle` 顶层恰好六键；所有层级都拒绝未知、缺失或错误类型字段。
 - 输出服务端必须基于源 Markdown 重新调用 `renderTypesettingMarkdown()`；禁止接收、复制或信任浏览器 preview DOM、CSS、diagnostics、blocked、文件名或 MIME。
+- Markdown 只规范 CRLF/裸 CR 为 LF，并只删除 body 末尾的 CR/LF 后补一个 LF；body 开头空白、行尾空格和末行非换行空白必须逐字节保留，禁止 `trim()` 其他正文空白。
 - `failedImageTargets` 仅接受本次重新渲染中唯一、受控、无凭据绝对 HTTPS `<img>` 的 target，按 DOM 顺序提交；未知、重复、乱序、静态占位、链接、非图片或旧 nonce 均拒绝。
 - blocker 仍返回规范 Markdown；只有 ready 返回 clipboard 和完整 HTML。静态占位、运行时坏图、conversion 与 advisory 不阻断。
 - 固定复制并适配 `doocs/md@a7c17fc4cda92e3c13aa7e24f06615cfa4219b31`（WTFPL v2）的 `solveWeChatImage()`、`modifyHtmlStructure()`、`createEmptyNode()`；不复制其 Vue/Pinia/store、DOM clone、图床、远程资源或失败降级。
@@ -43,11 +44,11 @@
 
 ## Review Focus
 
-- 非空 `failedImageTargets` 在服务端重启后因 target nonce 失配时，客户端必须同时让 render/output stale 并重新 render；空集合跨重启仍应接受。由 Task 2、Task 6 的 restart 测试固定。
+- 非空 `failedImageTargets` 在服务端重启后因 target nonce 失配时，客户端必须同时让 render/output stale 并重新 render；空集合跨重启仍应接受。由 Task 2、Task 7 的 restart 测试固定。
 - Juice 输出新增未知 style、`url()`、CSS variable、非法属性/标签，或防御性 sanitizer 改变 DOM 时，必须整包失败而非尽量保留。由 Task 3 的 failure seam/白名单测试固定。
-- 已有 ready bundle 后任一元信息、主题设置、脚注或坏图集合变化，慢旧 success/failure 都不得恢复旧 gate 或下载旧文件名。由 Task 5、Task 7 的完整 snapshot/竞态测试固定。
+- 已有 ready bundle 后任一元信息、主题设置、脚注或坏图集合变化，慢旧 success/failure 都不得恢复旧 gate 或下载旧文件名；“恢复当前主题默认值”的独立 click handler 也必须在改值前立即失效。由 Task 5、Task 7 的完整 snapshot/竞态测试固定。
 - Clipboard API 不支持、非 secure context、`supports()` 拒绝、write pending/reject 时，不能提前或错误显示富文本成功，也不能触发纯文本 fallback。由 Task 6、Task 7 的浏览器测试固定。
-- 本地 Markdown fallback 必须把 filename、mimeType、content 作为同一当前 artifact 计算；引号、冒号、井号、反斜线、多行元信息、CRLF、emoji/CJK 与 80 code point filename 不得和服务端漂移。由 Task 1、Task 5 的共享 fixture 测试固定。
+- 本地 Markdown fallback 必须把 filename、mimeType、content 作为同一当前 artifact 计算；引号、冒号、井号、反斜线、多行元信息、CRLF、body 开头空白、各行尾空格、末行非换行空白、emoji/CJK 与 80 code point filename 不得和服务端漂移。由 Task 1、Task 5 的共享 fixture 测试固定。
 
 ## 执行与审查协议
 
@@ -74,7 +75,7 @@
 **Interfaces:**
 - Produces: 精确运行时依赖 `juice@11.0.3`。
 - Produces: fixture 数组项 `{ name, document, artifact }`；`document` 恰好五个字符串，`artifact` 恰好 `{ mimeType, filename, content }`。
-- Freezes: `mimeType === 'text/markdown;charset=utf-8'`，front matter 顺序 `title/author/account/publishedAt`，JSON 双引号标量、LF、唯一最终 LF 与 basename 规则。
+- Freezes: `mimeType === 'text/markdown;charset=utf-8'`，front matter 顺序 `title/author/account/publishedAt`，JSON 双引号标量、LF、仅删除 body 末尾 CR/LF 后补唯一 LF、其他正文空白逐字节保留与 basename 规则。
 - Consumers: Task 2 的服务端 builder 测试与 Task 5 的浏览器 fallback 测试都读取同一 fixture，不另写期望算法。
 
 - [ ] **Step 1: 写失败的依赖与 fixture 契约测试**
@@ -92,7 +93,9 @@ assert.equal(item.artifact.content.endsWith('\n'), true);
 assert.equal(item.artifact.content.endsWith('\n\n'), false);
 ```
 
-Fixture 至少包含：普通中文、四项空值、引号/冒号/`#`/反斜线/多行元信息、CRLF 与裸 CR 正文、全点/禁用字符标题、emoji/CJK、超过 80 Unicode code point 标题。
+Fixture 至少包含：普通中文、四项空值、引号/冒号/`#`/反斜线/多行元信息、CRLF 与裸 CR 正文、全点/禁用字符标题、emoji/CJK、超过 80 Unicode code point 标题；另设一个空白保持 case，其 body 精确为 `"  开头\r\n行尾  \r末行空白  \n\n"`，artifact 的 front matter 后正文必须精确为 `"  开头\n行尾  \n末行空白  \n"`。这个 case 同时证明开头两个空格、两个行尾空格、末行两个非换行空格均保留，仅多余终止换行被压成唯一 LF。
+
+服务端 Task 2 与客户端 Task 5 都必须遍历全部 fixture，并对完整 `{ mimeType, filename, content }` 使用 `assert.deepEqual(actual, item.artifact)`；不得只断言 content 子串或重新计算 expected。
 
 - [ ] **Step 2: 运行测试确认 RED**
 
@@ -123,7 +126,7 @@ git commit -m "test: freeze typesetting output artifacts"
 
 - [ ] **Step 6: 独立 review gate**
 
-reviewer 核对 fixture 的 YAML 1.2/JSON 双引号语义、Unicode code point 截断和 lockfile 精确版本；`REWORK` 交回原 executor 修复，`PASS` 后进入 Task 2。
+reviewer 核对 fixture 的 YAML 1.2/JSON 双引号语义、正文首部/行尾/末行非换行空白逐字节保持、Unicode code point 截断和 lockfile 精确版本；`REWORK` 交回原 executor 修复，`PASS` 后进入 Task 2。
 
 ### Task 2: 建立严格输出深模块、Markdown/blocked bundle 与 failed target 所有权
 
@@ -184,7 +187,7 @@ Expected: FAIL，因为深模块不存在。
 
 - 模块加载时只读取同仓库 `public/typesetting-theme.css`；默认 Juice adapter 仅封装 `juice(htmlWithStyleTag, fixedOptions)`，不使用资源型 API；
 - 用 exact-key helper 规范化请求，五个字符串先规范 CRLF/CR；presentation 只经现有 normalizer；
-- 私有 `safeOutputBaseName(title)` 与 `buildNormalizedMarkdown(document)` 精确实现规格和 fixture；
+- 私有 `safeOutputBaseName(title)` 与 `buildNormalizedMarkdown(document)` 精确实现规格和 fixture；正文只先规范 CRLF/裸 CR，再用仅匹配末尾 `\n` 的逻辑移除终止换行并补一个 LF，禁止对 body 使用 `trim()` / `trimEnd()`；
 - 调用 renderer 后校验四键、presentation、diagnostics 数组、boolean blocked 且 `blocked === any blocker`；畸形结果统一安全 generation error；
 - 在 Cheerio fragment 中建立 target → elements 索引，验证请求唯一性/顺序/元素类型/HTTPS 无凭据/referrer policy/runtime 属性；
 - 把 failed 图片替换为固定可见占位，移除 target/runtime attrs；
@@ -221,7 +224,7 @@ reviewer 重点验证请求/响应 exact shape、renderer 四键不被扩展、t
 - Completes: Task 2 builder 的 ready 分支，返回非 null `clipboard` 与 `html`。
 - Consumes: `inlineCss(cleanFragment, fixedThemeCss, fixedOptions) -> string | Promise<string>`；非字符串、throw/reject 均为 `OUTPUT_GENERATION_FAILED`。
 - Preserves: `canonicalInlineBody` 只供完整 HTML；clipboard 从其 clone 派生，不把列表/图片/边界修正回写 canonical body。
-- Adapts privately: doocs `modifyHtmlStructure()`、`solveWeChatImage()`、`createEmptyNode()`；不导出这些 helper。
+- Adapts privately: doocs `modifyHtmlStructure()`、`solveWeChatImage()`、`createEmptyNode()`；不导出这些 helper。`solveWeChatImage()` 只是条件可达兼容适配：当前合法 renderer → Juice 路径没有 `width` / `height` HTML 属性，不要求或制造可观察的 attribute-to-style 转换。
 
 - [ ] **Step 1: 写失败的 Juice 固定调用和 canonical 白名单测试**
 
@@ -240,12 +243,12 @@ reviewer 重点验证请求/响应 exact shape、renderer 四键不被扩展、t
 添加：
 
 - `clipboard 嵌套列表按 doocs 规则外移且同一 li 多子列表不反转`
-- `clipboard 图片尺寸按 solveWeChatImage 收窄规则转 style`
+- `公开 builder 的最终图片只有主题内联安全尺寸 style 且无 width height 属性`
 - `运行时失败图片原位变成无 src 可见占位且不泄漏 URL`
 - `clipboard 首尾各一个 createEmptyNode 且完整 HTML 和 plain 不含边界`
 - `plain text 保留块列表表格pre图片和占位语义且不含元信息`
 
-覆盖 width/height 的整数、`px/%/em/rem`、height auto、负数/NaN/未知单位；默认图片固定 `display:block;max-width:100%;height:auto`。plain 断言标题/段落/`br`、两级 ul/ol、`ol[start]`、table tab、pre 空白、inline code、脚注、图片 alt、静态/运行时占位、空行压缩和无末尾 LF。
+对真实 `renderTypesettingMarkdown()` 可产生的合法图片链路断言 clipboard 与 full HTML 中保留图片最终都有内联 `display:block;max-width:100%;height:auto`，并且没有 `width` / `height` HTML 属性。通过 `inlineCss` failure seam 注入额外或未知 style declaration，断言整包以 `OUTPUT_GENERATION_FAILED` 失败。不得构造 renderer 已删除的 raw `width` / `height` attribute 数字、`px/%/em/rem` 或非法单位用例，也不得为了触发 `solveWeChatImage()` 扩展四键 RenderResult、恢复 sanitizer 删除的属性、重解析 Markdown/raw token，或伪造违反 #6 合法 HTML 契约的 RenderResult。plain 断言标题/段落/`br`、两级 ul/ol、`ol[start]`、table tab、pre 空白、inline code、脚注、图片 alt、静态/运行时占位、空行压缩和无末尾 LF。
 
 - [ ] **Step 3: 写失败的完整 HTML 安全壳和元信息边界测试**
 
@@ -265,7 +268,7 @@ assert.equal($('header dl dd').length, 3);
 
 - [ ] **Step 4: 运行测试确认 RED**
 
-Run: `node --test --test-name-pattern='三个主题|输出标签集合|anchor URL|table span|Juice|clipboard|plain text|完整 HTML' test/typesetting-output.test.js`
+Run: `node --test --test-name-pattern='三个主题|输出标签集合|anchor URL|table span|Juice|clipboard|公开 builder|plain text|完整 HTML' test/typesetting-output.test.js`
 
 Expected: FAIL，因为 ready 分支尚未生成完整安全产物。
 
@@ -278,11 +281,11 @@ Expected: FAIL，因为 ready 分支尚未生成完整安全产物。
 3. 移除 class/id/runtime attrs/CSS variables，逐节点验证固定标签、属性、URL、style property/value；
 4. 用独立 sanitize-html 输出策略清理并比较规范化 DOM；任何差异失败；
 5. 保存不可变 canonical section，生成完整 HTML 安全壳和 metadata header；
-6. clone canonical section，依次调用本地适配的 `modifyHtmlStructure()`、`solveWeChatImage()`、图片默认样式和第二次最终校验；
+6. clone canonical section，依次调用本地适配的 `modifyHtmlStructure()`、条件可达 `solveWeChatImage()`，再验证最终图片已有固定主题内联出的 `display:block;max-width:100%;height:auto`、不存在 `width` / `height` HTML 属性，并执行第二次最终校验；
 7. 从修正后 section 进行块语义 plain traversal；
 8. plain 完成后才在 section 外调用两次 `createEmptyNode()`，生成 clipboard HTML。
 
-三个 doocs helper 的结构和目的应能追溯到固定 commit；只作规格要求的服务端 DOM、长度白名单、列表顺序与 plain 边界适配。
+三个 doocs helper 的结构和目的应能追溯到固定 commit；只作规格要求的服务端 DOM、条件可达图片兼容、列表顺序与 plain 边界适配。当前 builder 无 raw 图片尺寸属性是必须保留的上游契约，不得为提高 helper 覆盖率改变生产数据流。
 
 - [ ] **Step 6: 运行 GREEN 与深模块全测**
 
@@ -399,6 +402,7 @@ fixture 测试必须逐项断言整个 `{ mimeType, filename, content }`，不�
 
 - 最新 RenderResult 原子应用后立即 output 请求，blocker 也请求；
 - 五字段、主题、四设置、脚注任一变化先失效，再进入 preview/save；
+- 添加 `已有 ready 后重置当前主题立即 stale 且只接受默认设置新 output`：当前主题先使用非默认设置并接受 ready bundle，点击 `#reset-theme` 后必须在任何字段写入和新请求前立即 stale；旧 output success/failure 均不能恢复 gate，新 output request 的 `presentation.settings` 必须等于该主题默认设置；
 - output 请求 snapshot 不含 revision/savedAt/preview HTML；
 - failed targets 按当前 DOM 顺序而非 error 到达顺序提交；loaded 不失效，首次 error 失效并重建，重复 error 不重建；
 - 慢旧 success/failure、非 2xx、malformed 200、schema/snapshot/status 与 renderBlocked 不一致都不能缓存；
@@ -406,7 +410,7 @@ fixture 测试必须逐项断言整个 `{ mimeType, filename, content }`，不�
 
 - [ ] **Step 3: 运行测试确认 RED**
 
-Run: `node --test --test-name-pattern='客户端本地 Markdown|客户端只接受|未知 schema|预生成|失效|慢旧' test/typesetting-output-ui.test.js`
+Run: `node --test --test-name-pattern='客户端本地 Markdown|客户端只接受|未知 schema|预生成|失效|重置当前主题|慢旧' test/typesetting-output-ui.test.js`
 
 Expected: FAIL，因为 output 状态机不存在。
 
@@ -416,6 +420,7 @@ Expected: FAIL，因为 output 状态机不存在。
 
 - 用递归 exact-key/value 比较，不用 JSON 子串或 revision 代替 snapshot；
 - 所有输入 change handler 在现有 preview/save 前调用 `invalidateOutput()`；
+- 现有 `themeControls.reset` 是不会触发 select `change` 的独立 click handler；它必须把 `invalidateOutput()` 作为 handler 的第一个状态变更，再写入当前主题默认设置、同步控件并调用现有 document-change 流程；
 - `applyRenderResult()` 清空旧 failed set、记录 applied render version 后触发 `requestOutput()`，包括 blocker；
 - `settleImage()` 只有当前 DOM/current version 的首次 error 才加入 Set、失效、重建；
 - 捕获 requestVersion/outputVersion/renderVersion/snapshot，并按规格八项接受条件原子缓存；
@@ -443,7 +448,7 @@ git commit -m "feat: cache current typesetting output bundle"
 
 - [ ] **Step 7: 独立 review gate**
 
-reviewer 核对完整 snapshot、双版本、旧事件、blocker/status 对应与 shared fixture；任何旧 bundle fallback、preview DOM 生成或 silent target drop 都是 `REWORK`。
+reviewer 核对完整 snapshot、双版本、旧事件、blocker/status 对应、reset handler 的先失效顺序与 shared fixture；任何旧 bundle fallback、重置后短暂沿用旧 gate、preview DOM 生成或 silent target drop 都是 `REWORK`。
 
 ### Task 6: 增加最小输出 UI、双 MIME Clipboard、元信息复制与 Blob 下载
 
@@ -541,7 +546,7 @@ reviewer 检查 rich 与 metadata/Markdown 副作用是否分离、点击时 gat
 
 - [ ] **Step 1: 写失败的全输入竞态矩阵**
 
-添加 `慢旧 output 成功失败均不能覆盖更新后的字段正文主题脚注与坏图 snapshot`：为五类变化分别延迟旧请求，在新请求接受后才 resolve/reject 旧请求；断言按钮状态、status/error、下载 filename/content、failed set 均保持新值。
+添加 `慢旧 output 成功失败均不能覆盖更新后的字段正文主题脚注与坏图 snapshot`：为五类变化分别延迟旧请求，在新请求接受后才 resolve/reject 旧请求；主题设置变化同时覆盖 select `change` 与 `#reset-theme` 独立 click 路径，断言按钮状态、status/error、下载 filename/content、presentation 默认设置和 failed set 均保持新值。
 
 添加 `render stale pending malformed 时旧 ready bundle 不能复制或下载 HTML`；快速重复点击时每次成功必须对应一次已 resolve write，pending 点击不能绕过 gate。
 
@@ -621,7 +626,7 @@ Expected: FAIL，因为 notice 尚未记录 clipboard helper 与 Juice。
 
 - [ ] **Step 3: 更新 notice，不夸大复用范围**
 
-在现有 doocs 表格增加固定 `clipboard.ts` / `clipboard-dom.ts` 来源，明确只复制三 helper 并作服务端 DOM、长度、安全、顺序和边界适配；新增 Juice 独立小节，记录版本/SHA/许可/copyright/Node/API/禁止资源抓取。明确浏览器标准 API 不属于第三方复制，且富文本成功语义主动偏离 doocs fallback。
+在现有 doocs 表格增加固定 `clipboard.ts` / `clipboard-dom.ts` 来源，明确只复制三 helper 并作服务端 DOM、条件可达图片兼容、安全、列表顺序和边界适配；新增 Juice 独立小节，记录版本/SHA/许可/copyright/Node/API/禁止资源抓取。明确浏览器标准 API 不属于第三方复制，且富文本成功语义主动偏离 doocs fallback。
 
 - [ ] **Step 4: 运行来源测试与完整验证**
 
