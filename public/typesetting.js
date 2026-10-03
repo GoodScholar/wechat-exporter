@@ -14,6 +14,23 @@ const severityNames = ['blocker', 'conversion', 'advisory'];
 const safeRemovedTypes = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
 const specialContentTypes = ['video', 'audio', 'embed', 'mini-program', 'poll'];
 const imageDiagnosticCodes = ['IMAGE_LOAD_FAILED', 'IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE'];
+const previewAllowedTags = new Set([
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
+  'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt', 'rtc',
+  'ruby', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr',
+  'caption', 'col', 'colgroup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr'
+]);
+const previewAllowedAttributes = Object.freeze({
+  a: ['href', 'title', 'data-format-target'],
+  blockquote: ['class', 'data-format-target', 'tabindex', 'role'],
+  figure: ['class', 'data-format-target', 'tabindex', 'role'],
+  p: ['class'],
+  img: ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'],
+  th: ['colspan', 'rowspan'],
+  td: ['colspan', 'rowspan'],
+  code: ['class']
+});
 const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
 let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings(), convertExternalLinksToFootnotes: false };
 let saveTimer;
@@ -70,13 +87,46 @@ function isPreviewTarget(target, detachedPreview) {
   return [...detachedPreview.querySelectorAll('[data-format-target]')]
     .filter(node => node.getAttribute('data-format-target') === target.id).length === 1;
 }
+function hasExactElementAttributes(element, names) {
+  return element.attributes.length === names.length && names.every(name => element.hasAttribute(name));
+}
+function hasAllowedPreviewElement(element) {
+  const tag = element.localName;
+  if (!previewAllowedTags.has(tag)) return false;
+  const allowedAttributes = previewAllowedAttributes[tag] || [];
+  if ([...element.attributes].some(attribute => !allowedAttributes.includes(attribute.name))) return false;
+  if (tag === 'a' && element.hasAttribute('href')) {
+    const href = element.getAttribute('href').trim();
+    if (href.startsWith('//')) return false;
+    const scheme = /^([a-z][a-z0-9+.-]*):/i.exec(href)?.[1].toLowerCase();
+    if (scheme && !['http', 'https', 'mailto'].includes(scheme)) return false;
+  }
+  if (tag === 'blockquote') {
+    if (!element.hasAttribute('class')) return element.attributes.length === 0;
+    return hasExactElementAttributes(element, previewAllowedAttributes.blockquote)
+      && element.getAttribute('class') === 'format-special-placeholder'
+      && element.getAttribute('role') === 'note' && element.getAttribute('tabindex') === '0';
+  }
+  if (tag === 'figure') {
+    if (!element.hasAttribute('class')) return element.attributes.length === 0;
+    return hasExactElementAttributes(element, previewAllowedAttributes.figure)
+      && element.getAttribute('class') === 'format-image-placeholder'
+      && element.getAttribute('role') === 'note' && element.getAttribute('tabindex') === '0';
+  }
+  if (tag === 'p' && element.hasAttribute('class')) {
+    return hasExactElementAttributes(element, ['class']) && element.getAttribute('class') === 'typeset-footnotes';
+  }
+  return true;
+}
 function hasStrictPreviewMarkup(detachedPreview) {
+  const elements = [...detachedPreview.querySelectorAll('*')];
+  if (!elements.every(hasAllowedPreviewElement)) return false;
   const targets = [...detachedPreview.querySelectorAll('[data-format-target]')]
     .map(node => node.getAttribute('data-format-target'));
   if (targets.some(target => !isNonEmptyString(target)) || new Set(targets).size !== targets.length) return false;
 
   const imageAttributes = ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'];
-  return [...detachedPreview.querySelectorAll('img')].every(img => {
+  return elements.filter(element => element.localName === 'img').every(img => {
     if (!hasExactKeys(Object.fromEntries([...img.attributes].map(attribute => [attribute.name, attribute.value])), imageAttributes)) return false;
     if (img.getAttribute('referrerpolicy') !== 'no-referrer' || img.getAttribute('data-image-state') !== 'pending') return false;
     try {

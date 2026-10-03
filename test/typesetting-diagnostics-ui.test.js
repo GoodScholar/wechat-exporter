@@ -38,7 +38,7 @@ function emptyResult(body = '') {
 function groupedResult(body) {
   const quotedTarget = 'target"quoted';
   return {
-    html: `<p><button type="button" tabindex="0" data-format-target="target&amp;literal">普通目标</button><button type="button" tabindex="0" data-format-target="target&quot;quoted">引号目标</button></p>`,
+    html: `<p><a href="https://example.test/target" data-format-target="target&amp;literal">普通目标</a></p><figure class="format-image-placeholder" tabindex="0" role="note" data-format-target="target&quot;quoted"><figcaption>引号目标</figcaption></figure>`,
     presentation: { theme: 'grace', settings: { ...settings, primaryColor: '#009874' } },
     diagnostics: [
       { id: 'render-blocker', code: 'RENDER_FAILED', severity: 'blocker', message: '渲染失败。', targets: [{ kind: 'source', start: 0, end: body.length }] },
@@ -61,7 +61,7 @@ function pendingImageResult(pathname, target = 'runtime-image-1', diagnostics = 
 
 function threeSeverityImageResult(body, pathname, target) {
   return {
-    html: `<figure role="note" tabindex="0" data-format-target="static-special"><figcaption>特殊内容占位</figcaption></figure><img src="https://fixture.invalid${pathname}" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`,
+    html: `<blockquote class="format-special-placeholder" role="note" tabindex="0" data-format-target="static-special"><p>特殊内容占位</p></blockquote><img src="https://fixture.invalid${pathname}" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`,
     presentation: { theme: 'default', settings },
     diagnostics: [
       { id: 'static-blocker', code: 'RENDER_FAILED', severity: 'blocker', message: '渲染失败。', targets: [{ kind: 'source', start: 0, end: body.length }] },
@@ -322,6 +322,82 @@ test('全局复用 target 或非受控 pending 图片使响应 stale 且不发�
   assert.deepEqual(imageRequests, []);
 });
 
+test('客户端在应用前拒绝服务端 sanitizer 合同外标签属性且不产生请求或执行', async t => {
+  const { page, base } = await withBrowser(t);
+  const externalRequests = [];
+  await page.route('**/api/settings', route => {
+    externalRequests.push(route.request().url());
+    return route.fulfill({ status: 204, body: '' });
+  });
+  let responseFor = request => emptyResult(request.body);
+  await installRenderFixture(page, request => responseFor(request));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('合法旧 UI');
+  await waitForRenderState(page, 'current');
+  const accepted = await page.evaluate(() => ({
+    html: document.querySelector('#preview').innerHTML,
+    className: document.querySelector('#preview').className,
+    style: document.querySelector('#preview').getAttribute('style'),
+    checks: document.querySelector('#format-checks').innerHTML
+  }));
+  const malformedCases = [
+    ['iframe', '<iframe src="/api/settings"></iframe>'],
+    ['script', '<script>document.body.dataset.polluted="script"</script>'],
+    ['object/embed', '<object data="/api/settings"></object><embed src="/api/settings">'],
+    ['link/meta', '<link rel="stylesheet" href="/api/settings"><meta http-equiv="refresh" content="0;url=/api/settings">'],
+    ['media/source/picture', '<video src="/api/settings"></video><audio src="/api/settings"></audio><picture><source srcset="/api/settings"><img src="https://fixture.invalid/unused.png" alt="unused" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="unused"></picture>'],
+    ['form/input', '<form action="/api/settings"><input name="secret"></form>'],
+    ['style tag', '<style>body{display:none}</style>'],
+    ['event/style attribute', '<p onclick="document.body.dataset.polluted=\'event\'" style="color:red">正文</p>'],
+    ['non-image src', '<p src="/api/settings">正文</p>'],
+    ['unsafe anchor href', '<a href="javascript:document.body.dataset.polluted=\'href\'">危险链接</a>'],
+    ['protocol-relative anchor href', '<a href="//fixture.invalid/unsafe">协议相对链接</a>'],
+    ['forged controlled blockquote', '<blockquote class="format-special-placeholder" role="button" tabindex="1" data-format-target="forged-special">伪造</blockquote>'],
+    ['forged controlled figure', '<figure class="format-image-placeholder" role="button" tabindex="1" data-format-target="forged-image">伪造</figure>'],
+    ['invalid controlled paragraph class', '<p class="typeset-footnotes extra">伪造</p>']
+  ];
+
+  for (const [label, html] of malformedCases) {
+    responseFor = () => ({ html, presentation: { theme: 'default', settings }, diagnostics: [], blocked: false });
+    await page.getByLabel('Markdown 正文').fill(`DOM-合同-${label}`);
+    await waitForRenderState(page, 'stale');
+    await page.waitForTimeout(80);
+    assert.deepEqual(await page.evaluate(() => ({
+      html: document.querySelector('#preview').innerHTML,
+      className: document.querySelector('#preview').className,
+      style: document.querySelector('#preview').getAttribute('style'),
+      checks: document.querySelector('#format-checks').innerHTML
+    })), accepted, label);
+    assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'unknown', label);
+    assert.equal(await page.evaluate(() => document.body.dataset.polluted), undefined, label);
+  }
+  assert.deepEqual(externalRequests, []);
+});
+
+test('客户端接受真实 renderer 的标题表格代码链接脚注特殊内容及图片结构', async t => {
+  const { page, base } = await withBrowser(t);
+  await page.route('https://fixture.invalid/contract.png', route => route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('外链转脚注').check();
+  await page.getByLabel('Markdown 正文').fill([
+    '# 标题',
+    '段落 [外链](https://example.test/path)',
+    ['| 列 |', '| --- |', '| 值 |'].join('\n'),
+    ['```js', 'const value = 1;', '```'].join('\n'),
+    '> [特殊内容：视频] 来源：https://media.example/video',
+    '![远程图片](https://fixture.invalid/contract.png)',
+    '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。'
+  ].join('\n\n'));
+  await waitForRenderState(page, 'current');
+  await page.locator('#preview img[data-image-state="loaded"]').waitFor();
+
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+  assert.ok(await page.locator('#preview p').count() > 0);
+  for (const selector of ['#preview h1', '#preview table', '#preview code.language-js', '#preview a[data-format-target]', '#preview p.typeset-footnotes', '#preview blockquote.format-special-placeholder', '#preview img[referrerpolicy="no-referrer"]', '#preview figure.format-image-placeholder']) {
+    assert.equal(await page.locator(selector).count(), 1, selector);
+  }
+});
+
 test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async t => {
   const { page, base } = await withBrowser(t);
   const requests = [];
@@ -487,7 +563,7 @@ test('旧 preview 图片 load error 和过期响应不能污染新 HTML diagnost
     }
     if (request.body === '旧图片') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(pendingImageResult('/held.png', 'old-target')) });
     if (request.body === '新响应') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({
-      html: '<figure class="format-image-placeholder" data-image-state="unsupported-scheme" data-format-target="new-target" role="note" tabindex="0"><figcaption>不支持的图片来源。</figcaption></figure>',
+      html: '<figure class="format-image-placeholder" data-format-target="new-target" role="note" tabindex="0"><figcaption>不支持的图片来源。</figcaption></figure>',
       presentation: { theme: 'default', settings },
       diagnostics: [{ id: 'new-static-image', code: 'IMAGE_UNSUPPORTED_SCHEME', severity: 'advisory', message: '图片协议不受支持。', targets: [{ kind: 'preview', id: 'new-target' }] }],
       blocked: false
@@ -536,7 +612,7 @@ test('静态不支持图片不发起网络请求且全部图片问题保持非�
     const request = route.request().postDataJSON();
     if (request.body !== '静态与动态图片') return route.continue();
     return route.fulfill({ contentType: 'application/json', body: JSON.stringify({
-      html: '<figure class="format-image-placeholder" data-image-state="unsupported-scheme" data-format-target="static-unsupported" role="note" tabindex="0"><figcaption>图片协议不受支持。</figcaption></figure><img src="https://fixture.invalid/nonblocking-failure.png" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-failure">',
+      html: '<figure class="format-image-placeholder" data-format-target="static-unsupported" role="note" tabindex="0"><figcaption>图片协议不受支持。</figcaption></figure><img src="https://fixture.invalid/nonblocking-failure.png" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-failure">',
       presentation: { theme: 'default', settings },
       diagnostics: [{ id: 'static-unsupported', code: 'IMAGE_UNSUPPORTED_SCHEME', severity: 'advisory', message: '图片协议不受支持。', targets: [{ kind: 'preview', id: 'static-unsupported' }] }],
       blocked: false
@@ -789,7 +865,7 @@ test('富文本 removed 合并为单条 conversion 并定位实际插入 UTF-16 
   const { page, base } = await withBrowser(t);
   await page.route('https://fixture.invalid/audit.png', route => route.fulfill({ status: 404, contentType: 'image/png', body: '' }));
   await installRenderFixture(page, request => request.body ? {
-    html: '<figure role="note" tabindex="0" data-format-target="static-special"><figcaption>特殊内容</figcaption></figure><img src="https://fixture.invalid/audit.png" alt="审计图" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-image">',
+    html: '<blockquote class="format-special-placeholder" role="note" tabindex="0" data-format-target="static-special"><p>特殊内容</p></blockquote><img src="https://fixture.invalid/audit.png" alt="审计图" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-image">',
     presentation: { theme: request.theme, settings: request.settings },
     diagnostics: [{ id: 'static-conversion', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '特殊内容已转为占位。', targets: [{ kind: 'preview', id: 'static-special' }], meta: { type: 'video' } }],
     blocked: false

@@ -1,4 +1,5 @@
 import { createHmac, randomUUID } from 'node:crypto';
+import { load } from 'cheerio';
 import sanitizeHtml from 'sanitize-html';
 import { marked, Renderer } from 'marked';
 import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
@@ -121,12 +122,12 @@ function normalLinkHtml({ href, title, content, targetId, footnote }) {
   return `<a href="${escapeHtml(href)}"${titleAttribute}${targetAttribute}>${content}${reference}</a>`;
 }
 
-function decorateMarkedLink(html, targetId, footnote) {
+function decorateMarkedLink(html, targetId) {
   const openingEnd = html.indexOf('>');
   if (!html.startsWith('<a ') || openingEnd === -1 || !html.endsWith('</a>')) {
     throw new TypeError('Marked link renderer returned an unexpected result');
   }
-  return `${html.slice(0, openingEnd)} data-format-target="${escapeHtml(targetId)}"${html.slice(openingEnd, -4)}<sup>[${footnote}]</sup></a>`;
+  return `${html.slice(0, openingEnd)} data-format-target="${escapeHtml(targetId)}"${html.slice(openingEnd)}`;
 }
 
 function parseHttpUrl(href) {
@@ -314,6 +315,7 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
       const footnotes = [];
       const footnoteByUrl = new Map();
       const targetKinds = new Map();
+      const linkTitleByTarget = new Map();
       const targetNonce = createHmac('sha256', targetSecret).update(body).digest('hex').slice(0, 24);
       let nextTarget = 1;
       let blockquoteDepth = 0;
@@ -364,6 +366,31 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
         return index;
       };
 
+      const decorateExternalLinks = html => {
+        if (!convertExternalLinksToFootnotes) return html;
+        const $ = load(html, null, false);
+        $('a').each((_, element) => {
+          const anchor = $(element);
+          const targetId = anchor.attr('data-format-target');
+          const insideSpecialPlaceholder = anchor.parents('[data-format-target]').toArray()
+            .some(parent => targetKinds.get($(parent).attr('data-format-target')) === 'special');
+          if (insideSpecialPlaceholder) return;
+
+          const url = parseHttpUrl(anchor.attr('href'));
+          if (!url || isWeChatArticle(url)) return;
+          const controlledMarkdownTarget = targetKinds.get(targetId) === 'link';
+          const target = controlledMarkdownTarget ? { kind: 'preview', id: targetId } : createTarget('link');
+          const title = controlledMarkdownTarget
+            ? linkTitleByTarget.get(targetId)
+            : anchor.attr('title') || anchor.text().trim() || url.href;
+          const footnote = addFootnote(title || url.href, url.href, target);
+          anchor.attr('href', url.href);
+          anchor.attr('data-format-target', target.id);
+          anchor.append($('<sup></sup>').text(`[${footnote}]`));
+        });
+        return $.root().html() || '';
+      };
+
       const renderer = new Renderer();
       const defaultLink = renderer.link;
       renderer.link = function link(token) {
@@ -377,8 +404,8 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
 
         const rendered = defaultLink.call(this, { ...token, href: url.href });
         const target = createTarget('link');
-        const footnote = addFootnote(token.title || token.text || url.href, url.href, target);
-        return decorateMarkedLink(rendered, target.id, footnote);
+        linkTitleByTarget.set(target.id, token.title || token.text || url.href);
+        return decorateMarkedLink(rendered, target.id);
       };
       renderer.image = function image(token) {
         const alt = token.tokens
@@ -417,7 +444,7 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
 
       const parsed = parseMarkdown(body, { gfm: true, breaks: true, renderer });
       if (typeof parsed !== 'string') throw new TypeError('parseMarkdown 必须同步返回字符串');
-      const html = sanitizeHtml(parsed + buildFootnotes(footnotes), createSanitizerOptions(targetKinds, createImageFact));
+      const html = sanitizeHtml(decorateExternalLinks(parsed) + buildFootnotes(footnotes), createSanitizerOptions(targetKinds, createImageFact));
       return toRenderResult({ html, presentation, diagnostics });
     } catch {
       return toRenderResult({

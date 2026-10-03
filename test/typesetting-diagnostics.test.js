@@ -5,6 +5,7 @@ import { readFileSync } from 'node:fs';
 import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
 import os from 'node:os';
 import path from 'node:path';
+import { load } from 'cheerio';
 import { convertRichText } from '../src/rich-text.js';
 import { createApp } from '../src/server.js';
 import { createTypesettingRenderer, renderTypesettingMarkdown } from '../src/typesetting-render.js';
@@ -454,6 +455,50 @@ test('开启脚注时沿用 Marked autolink 与 cleanUrl 输出后仅追加 targ
   assert.doesNotMatch(result.html, /title=/);
 });
 
+test('raw HTML 外链与 Markdown 共享脚注去重编号且保留微信例外', () => {
+  const shared = 'https://example.test/shared';
+  const second = 'https://example.test/second';
+  const body = [
+    `<a href="${second}"><span>第一个 raw</span></a>`,
+    `<a href="${shared}" title="Raw 标题" data-format-target="spoof" onclick="evil()" style="color:red"><strong>Raw <em>嵌套</em></strong></a>`,
+    `[Markdown 同址](${shared})`,
+    '<a href="https://mp.weixin.qq.com/s?id=1">微信文章</a>',
+    '<a href="mailto:reader@example.test">邮件</a>',
+    '<a>无 href</a>'
+  ].join('\n\n');
+  const enabled = renderTypesettingMarkdown(input(body, true));
+  const diagnostics = conversionDiagnostics(enabled, 'EXTERNAL_LINK_TO_FOOTNOTE');
+  const $ = load(enabled.html, null, false);
+
+  assert.deepEqual(diagnostics.map(item => item.meta), [
+    { footnote: 1, occurrences: 1 },
+    { footnote: 2, occurrences: 2 }
+  ]);
+  assert.equal(diagnostics[1].targets.length, 2);
+  assert.equal(new Set(diagnostics.flatMap(item => item.targets.map(target => target.id))).size, 3);
+  assert.equal($(`a[href="${shared}"]`).length, 2);
+  assert.equal($(`a[href="${shared}"] sup`).filter((_, item) => $(item).text() === '[2]').length, 2);
+  assert.equal($(`a[href="${second}"] sup`).text(), '[1]');
+  assert.equal($('a[href^="https://mp.weixin.qq.com/s"] sup').length, 0);
+  assert.equal($('a[href^="https://mp.weixin.qq.com/s"][data-format-target]').length, 0);
+  assert.equal($('a[href^="mailto:"] sup, a:not([href]) sup').length, 0);
+  assert.equal($(`a[href="${shared}"]`).first().text(), 'Raw 嵌套[2]');
+  assert.doesNotMatch(enabled.html, /onclick|style=|data-format-target="spoof"|evil\(\)/i);
+  assert.equal(enabled.html.match(/<sup>\[1\]<\/sup>/g)?.length, 1);
+  assert.equal(enabled.html.match(/<sup>\[2\]<\/sup>/g)?.length, 2);
+
+  const rawOnly = renderTypesettingMarkdown(input('<a href="https://raw.example/path" title="Raw only"><b>纯 raw</b></a>', true));
+  const rawOnlyDiagnostic = conversionDiagnostics(rawOnly, 'EXTERNAL_LINK_TO_FOOTNOTE');
+  assert.deepEqual(rawOnlyDiagnostic.map(item => item.meta), [{ footnote: 1, occurrences: 1 }]);
+  assert.match(rawOnly.html, /<a href="https:\/\/raw\.example\/path" title="Raw only" data-format-target="[^"]+"><b>纯 raw<\/b><sup>\[1\]<\/sup><\/a>/);
+  assert.match(rawOnly.html, /<code>\[1\]<\/code> Raw only：/);
+
+  const disabled = renderTypesettingMarkdown(input(body, false));
+  assert.equal(conversionDiagnostics(disabled, 'EXTERNAL_LINK_TO_FOOTNOTE').length, 0);
+  assert.doesNotMatch(disabled.html, /typeset-footnotes|<sup>|data-format-target|onclick|style=|evil\(\)/i);
+  assert.equal(load(disabled.html, null, false)(`a[href="${shared}"]`).length, 2);
+});
+
 test('脚注与特殊占位经过最终清理且多次 render 编号重置', () => {
   const body = [
     '<a href="https://raw.example" data-format-target="spoof" data-evil="1" onclick="alert(1)" style="color:red">原始链接</a>',
@@ -464,10 +509,14 @@ test('脚注与特殊占位经过最终清理且多次 render 编号重置', () 
   const first = renderTypesettingMarkdown(input(body, true));
   const second = renderTypesettingMarkdown(input('[另一个](https://second.example/path)', true));
 
+  const firstFootnotes = conversionDiagnostics(first, 'EXTERNAL_LINK_TO_FOOTNOTE');
+  assert.deepEqual(firstFootnotes.map(item => item.meta), [
+    { footnote: 1, occurrences: 1 },
+    { footnote: 2, occurrences: 1 }
+  ]);
+  const secondFootnotes = conversionDiagnostics(second, 'EXTERNAL_LINK_TO_FOOTNOTE');
+  assert.deepEqual(secondFootnotes.map(item => item.meta), [{ footnote: 1, occurrences: 1 }]);
   for (const result of [first, second]) {
-    const footnotes = conversionDiagnostics(result, 'EXTERNAL_LINK_TO_FOOTNOTE');
-    assert.equal(footnotes.length, 1);
-    assert.deepEqual(footnotes[0].meta, { footnote: 1, occurrences: 1 });
     assert.match(result.html, /<sup>\[1\]<\/sup>/);
     assert.equal(new Set(result.diagnostics.map(item => item.id)).size, result.diagnostics.length);
     for (const diagnostic of result.diagnostics) assertPreviewTargetsAreStrictAndPresent(result, diagnostic);
