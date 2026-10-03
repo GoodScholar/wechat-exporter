@@ -81,7 +81,7 @@ function escapeMarkdown(value) {
   return value.replace(/([\\`*_[\]{}()#+.!|<>&~-])/g, '\\$1');
 }
 
-function decodeImageAltMarkdown(value) {
+function decodeMarkdownEscapes(value) {
   return value.replace(/\\([\\`*_[\]{}()#+.!|<>&~-])/g, '$1');
 }
 
@@ -157,7 +157,7 @@ function parseSpecialContent(token) {
 
   const [, label, source] = match;
   if (!source) return { label, type: specialContentTypeByLabel[label] };
-  const url = parseHttpUrl(source);
+  const url = parseHttpUrl(decodeMarkdownEscapes(source));
   if (!url || url.username || url.password) return { label, type: specialContentTypeByLabel[label] };
   return { label, type: specialContentTypeByLabel[label], sourceUrl: url.href };
 }
@@ -173,7 +173,7 @@ function parseCanonicalImagePlaceholder(token) {
     const prefix = `${fixed} 替代文本：`;
     if (!text.startsWith(prefix)) continue;
     const rawAlt = text.slice(prefix.length);
-    const alt = normalizeImageAlt(decodeImageAltMarkdown(rawAlt));
+    const alt = normalizeImageAlt(decodeMarkdownEscapes(rawAlt));
     if (alt && escapeMarkdown(alt) === rawAlt) return { reason, alt };
   }
   return null;

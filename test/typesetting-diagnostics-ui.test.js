@@ -252,6 +252,76 @@ test('畸形 RenderResult 的 HTTPS 图片在 strict 校验前不会发起请求
   assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'unknown');
 });
 
+test('全局复用 target 或非受控 pending 图片使响应 stale 且不发请求不污染已接受 UI', async t => {
+  const { page, base } = await withBrowser(t);
+  const imageRequests = [];
+  await page.route('https://sideeffect.invalid/**', route => {
+    imageRequests.push(route.request().url());
+    return route.abort('blockedbyclient');
+  });
+  await page.route('http://sideeffect.invalid/**', route => {
+    imageRequests.push(route.request().url());
+    return route.abort('blockedbyclient');
+  });
+  let responseFor = request => request.body === 'A😀B' ? groupedResult(request.body) : emptyResult(request.body);
+  await installRenderFixture(page, request => responseFor(request));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('A😀B');
+  await waitForRenderState(page, 'current');
+  const accepted = await page.evaluate(() => {
+    const preview = document.querySelector('#preview');
+    return {
+      html: preview.innerHTML,
+      className: preview.className,
+      style: preview.getAttribute('style'),
+      checks: document.querySelector('#format-checks').innerHTML
+    };
+  });
+
+  const malformedCases = [
+    ['pending 图片复用 target', {
+      html: '<img src="https://sideeffect.invalid/one.png" alt="one" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="shared-image"><img src="https://sideeffect.invalid/two.png" alt="two" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="shared-image">',
+      diagnostics: []
+    }],
+    ['不同诊断复用 preview target', {
+      html: '<figure class="format-special-placeholder" data-format-target="shared-diagnostic" tabindex="0" role="note">特殊内容</figure>',
+      diagnostics: [
+        { id: 'special-one', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '特殊内容一。', targets: [{ kind: 'preview', id: 'shared-diagnostic' }], meta: { type: 'video' } },
+        { id: 'special-two', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '特殊内容二。', targets: [{ kind: 'preview', id: 'shared-diagnostic' }], meta: { type: 'audio' } }
+      ]
+    }],
+    ['空 target', { html: '<span data-format-target=""></span>', diagnostics: [] }],
+    ['pending 图片缺少 target', { html: '<img src="https://sideeffect.invalid/missing-target.png" alt="missing" referrerpolicy="no-referrer" data-image-state="pending">', diagnostics: [] }],
+    ['pending 图片不是 HTTPS', { html: '<img src="http://sideeffect.invalid/http.png" alt="http" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="http-image">', diagnostics: [] }],
+    ['pending 图片携带非服务端白名单属性', { html: '<img src="https://sideeffect.invalid/danger.png" alt="danger" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="danger-image" onerror="document.body.dataset.polluted=\'true\'">', diagnostics: [] }]
+  ];
+
+  for (const [label, fixture] of malformedCases) {
+    responseFor = () => ({
+      html: fixture.html,
+      presentation: { theme: 'default', settings },
+      diagnostics: fixture.diagnostics,
+      blocked: false
+    });
+    await page.getByLabel('Markdown 正文').fill(`严格校验-${label}`);
+    await waitForRenderState(page, 'stale');
+    await page.waitForTimeout(80);
+    assert.deepEqual(await page.evaluate(() => {
+      const preview = document.querySelector('#preview');
+      return {
+        html: preview.innerHTML,
+        className: preview.className,
+        style: preview.getAttribute('style'),
+        checks: document.querySelector('#format-checks').innerHTML
+      };
+    }), accepted, label);
+    assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'unknown', label);
+    assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '1', label);
+    assert.equal(await page.evaluate(() => document.body.dataset.polluted), undefined, label);
+  }
+  assert.deepEqual(imageRequests, []);
+});
+
 test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async t => {
   const { page, base } = await withBrowser(t);
   const requests = [];

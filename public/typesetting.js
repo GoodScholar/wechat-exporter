@@ -70,6 +70,21 @@ function isPreviewTarget(target, detachedPreview) {
   return [...detachedPreview.querySelectorAll('[data-format-target]')]
     .filter(node => node.getAttribute('data-format-target') === target.id).length === 1;
 }
+function hasStrictPreviewMarkup(detachedPreview) {
+  const targets = [...detachedPreview.querySelectorAll('[data-format-target]')]
+    .map(node => node.getAttribute('data-format-target'));
+  if (targets.some(target => !isNonEmptyString(target)) || new Set(targets).size !== targets.length) return false;
+
+  const imageAttributes = ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'];
+  return [...detachedPreview.querySelectorAll('img')].every(img => {
+    if (!hasExactKeys(Object.fromEntries([...img.attributes].map(attribute => [attribute.name, attribute.value])), imageAttributes)) return false;
+    if (img.getAttribute('referrerpolicy') !== 'no-referrer' || img.getAttribute('data-image-state') !== 'pending') return false;
+    try {
+      const source = new URL(img.getAttribute('src'));
+      return source.protocol === 'https:' && !source.username && !source.password;
+    } catch { return false; }
+  });
+}
 function hasValidTargets(diagnostic, body, detachedPreview, kind, count) {
   if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
   if (count !== undefined && diagnostic.targets.length !== count) return false;
@@ -124,8 +139,11 @@ function isValidRenderResult(value, body, detachedPreview) {
   if (!hasExactKeys(value, ['html', 'presentation', 'diagnostics', 'blocked'])
     || typeof value.html !== 'string' || !isValidPresentation(value.presentation)
     || !Array.isArray(value.diagnostics) || typeof value.blocked !== 'boolean') return false;
+  if (!hasStrictPreviewMarkup(detachedPreview)) return false;
   if (value.diagnostics.some(item => !isValidDiagnostic(item, body, detachedPreview))) return false;
   if (new Set(value.diagnostics.map(item => item.id)).size !== value.diagnostics.length) return false;
+  const previewTargets = value.diagnostics.flatMap(item => item.targets.filter(target => target.kind === 'preview').map(target => target.id));
+  if (new Set(previewTargets).size !== previewTargets.length) return false;
   return value.blocked === value.diagnostics.some(item => item.severity === 'blocker');
 }
 function isSafeHttpUrl(value) {

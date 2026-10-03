@@ -384,6 +384,28 @@ test('特殊内容完整规范块重建单条 conversion 且来源不进入脚�
   assert.equal(conversionDiagnostics(nonCanonical, 'SPECIAL_CONTENT_PLACEHOLDER').length, 0);
 });
 
+test('富文本特殊媒体来源的 Markdown 控制字符转义安全往返', () => {
+  const source = 'https://media.example/a_b*c[d]e?under=_&star=*&brackets=[x]&slash=one\\two';
+  const canonicalSource = new URL(source).href;
+  const converted = convertRichText(`<video src="${source.replaceAll('&', '&amp;')}"></video>`);
+
+  assert.deepEqual(converted.downgraded, [{ type: 'video', sourceUrl: canonicalSource }]);
+  assert.match(converted.markdown, /a\\_b\\\*c\\\[d\\\]e/);
+  assert.match(converted.markdown, /slash=one\\\\two/);
+
+  const result = renderTypesettingMarkdown(input(converted.markdown, true));
+  const diagnostics = conversionDiagnostics(result, 'SPECIAL_CONTENT_PLACEHOLDER');
+  const href = /<a href="([^"]+)"/.exec(result.html)?.[1]
+    .replaceAll('&amp;', '&');
+
+  assert.equal(href, canonicalSource);
+  assert.equal(new URL(href).pathname, '/a_b*c[d]e');
+  assert.equal(diagnostics.length, 1);
+  assert.deepEqual(diagnostics[0].meta, { type: 'video' });
+  assert.equal(conversionDiagnostics(result, 'EXTERNAL_LINK_TO_FOOTNOTE').length, 0);
+  assert.equal(result.html.match(/format-special-placeholder/g)?.length, 1);
+});
+
 test('特殊内容非法来源被丢弃但仍重建占位且不进入脚注', () => {
   const body = [
     '> [特殊内容：视频] 来源：https://reader:secret@media.example/video',
