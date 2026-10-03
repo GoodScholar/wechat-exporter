@@ -925,6 +925,35 @@ test('plain text 将块容器中行内语义兄弟间的换行空白保留为单
   assert.equal(bundle.clipboard.plain.content, ['甲 乙', '丙 丁', '戊 己', '', '庚 辛'].join('\n'));
 });
 
+test('plain text 去除可见结构文本的换行缩进并保留内部与 inline 空格', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const indentationCases = [
+    ['<blockquote>\n  引用\n</blockquote>', '引用'],
+    ['<dl><dt>\n  术语\n</dt></dl>', '术语'],
+    ['<dl><dd>\n  解释\n</dd></dl>', '解释'],
+    ['<figure><figcaption>\n  图注\n</figcaption></figure>', '图注']
+  ];
+
+  for (const [body, expected] of indentationCases) {
+    const bundle = await buildTypesettingOutput(outputRequest({ document: { ...document, body } }));
+    assert.equal(bundle.status, 'ready');
+    assert.equal(bundle.clipboard.plain.content, expected);
+  }
+
+  const internal = await buildTypesettingOutput(outputRequest({
+    document: { ...document, body: '<blockquote>甲\n  乙</blockquote>' }
+  }));
+  assert.equal(internal.clipboard.plain.content, '甲 乙');
+
+  const aroundInline = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: '<figure><figcaption>\n  前文\n  <strong>行内</strong>\n  后文\n</figcaption></figure>'
+    }
+  }));
+  assert.equal(aroundInline.clipboard.plain.content, '前文 行内 后文');
+});
+
 test('plain text 在 inline 与段落列表表格块边界输出 LF', async () => {
   const { buildTypesettingOutput } = await loadOutputModule();
   const bundle = await buildTypesettingOutput(outputRequest({

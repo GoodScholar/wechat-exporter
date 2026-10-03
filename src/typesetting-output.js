@@ -688,22 +688,34 @@ function isVisibleInlinePlainNode($, node) {
   return node.tagName === 'img' || /\S/u.test($(node).text().replace(/\u00a0/gu, ' '));
 }
 
-function inlineWhitespaceBetweenVisibleSiblings($, node) {
+function adjacentSemanticPlainNode(node, direction) {
   const siblings = node.parent?.children || [];
-  const index = siblings.indexOf(node);
-  let before = index - 1;
-  let after = index + 1;
-  while (before >= 0 && siblings[before].type === 'text' && !/\S/u.test(siblings[before].data || '')) before -= 1;
-  while (after < siblings.length && siblings[after].type === 'text' && !/\S/u.test(siblings[after].data || '')) after += 1;
-  return isVisibleInlinePlainNode($, siblings[before]) && isVisibleInlinePlainNode($, siblings[after]);
+  for (let index = siblings.indexOf(node) + direction; index >= 0 && index < siblings.length; index += direction) {
+    const sibling = siblings[index];
+    if (sibling.type !== 'text' || /\S/u.test(sibling.data || '')) return sibling;
+  }
+  return undefined;
+}
+
+function inlineWhitespaceBetweenVisibleSiblings($, node) {
+  return isVisibleInlinePlainNode($, adjacentSemanticPlainNode(node, -1))
+    && isVisibleInlinePlainNode($, adjacentSemanticPlainNode(node, 1));
 }
 
 function renderPlainTextNode($, node, depth = 0) {
   if (node.type === 'text') {
     const raw = node.data || '';
-    const value = raw.replace(/[\s\u00a0]+/gu, ' ');
-    if (!value.trim() && /[\r\n]/u.test(raw) && structuralWhitespaceParents.has(node.parent?.tagName)) {
+    let value = raw.replace(/[\s\u00a0]+/gu, ' ');
+    if (!value.trim() && structuralWhitespaceParents.has(node.parent?.tagName)) {
       return inlineWhitespaceBetweenVisibleSiblings($, node) ? ' ' : '';
+    }
+    if (value.trim() && structuralWhitespaceParents.has(node.parent?.tagName)) {
+      const leadingWhitespace = /^[\s\u00a0]*/u.exec(raw)?.[0] || '';
+      const trailingWhitespace = /[\s\u00a0]*$/u.exec(raw)?.[0] || '';
+      const before = adjacentSemanticPlainNode(node, -1);
+      const after = adjacentSemanticPlainNode(node, 1);
+      if (/[\r\n]/u.test(leadingWhitespace) && (!before || isPlainTextBlockNode(before))) value = value.replace(/^ /u, '');
+      if (/[\r\n]/u.test(trailingWhitespace) && (!after || isPlainTextBlockNode(after))) value = value.replace(/ $/u, '');
     }
     return value;
   }
