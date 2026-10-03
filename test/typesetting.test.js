@@ -153,7 +153,7 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     const initial = await (await fetch(server.base + '/api/typesetting/document')).json();
     assert.deepEqual(initial.document, {
       title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '',
-      theme: 'default', themeSettings: expectedThemeSettings
+      theme: 'default', themeSettings: expectedThemeSettings, convertExternalLinksToFootnotes: false
     });
     const unsafe = '# 标题\n\n<script>alert(1)</script><img src="javascript:alert(1)" onerror="alert(2)">\n\n[危险](javascript:alert(3))';
     const preview = await (await post(server.base, '/api/typesetting/render', {
@@ -216,7 +216,7 @@ test('旧排版文稿补齐三套默认主题并在下次保存后跨重启持�
     await mkdir(store.dataDir, { recursive: true });
     await writeFile(store.file, JSON.stringify(legacy), 'utf8');
     const migrated = await store.load();
-    assert.deepEqual(migrated, { ...legacy, theme: 'default', themeSettings: expectedThemeSettings });
+    assert.deepEqual(migrated, { ...legacy, theme: 'default', themeSettings: expectedThemeSettings, convertExternalLinksToFootnotes: false });
 
     const saved = await store.save({ ...migrated, revision: 2 });
     assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved);
@@ -313,6 +313,85 @@ test('主题设置写入失败时旧配置仍是内存和重启后的唯一可�
       }, persisted, phase);
       assert.deepEqual(await store.load(), saved, phase);
       assert.deepEqual(await new TypesettingStore(store.dataDir).load(), saved, phase);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('旧文稿默认关闭外链脚注并在下次保存后跨重启持久化', async () => {
+  for (const source of ['current-version', 'recovery-version', 'legacy-current', 'legacy-backup']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-migration-'));
+    const store = new TypesettingStore(path.join(root, '.data'));
+    const legacy = documentWithTheme({ revision: 0, savedAt: '' });
+    try {
+      await mkdir(store.dataDir, { recursive: true });
+      if (source === 'current-version' || source === 'recovery-version') {
+        await mkdir(store.versions, { recursive: true });
+        await writeFile(path.join(store.versions, 'current.json'), source === 'current-version' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
+        await writeFile(path.join(store.versions, 'recovery.json'), JSON.stringify(legacy), 'utf8');
+        await writeFile(store.manifest, JSON.stringify({ current: 'current', recovery: 'recovery' }), 'utf8');
+      } else {
+        await writeFile(store.file, source === 'legacy-current' ? JSON.stringify(legacy) : '{corrupted', 'utf8');
+        await writeFile(store.backup, JSON.stringify(legacy), 'utf8');
+      }
+
+      const migrated = await store.load();
+      assert.equal(migrated.convertExternalLinksToFootnotes, false, source);
+      assert.equal(migrated.revision, 0, source);
+      const saved = await store.save({ ...migrated, convertExternalLinksToFootnotes: true, revision: 1 });
+      assert.equal(saved.convertExternalLinksToFootnotes, true, source);
+      assert.equal((await new TypesettingStore(store.dataDir).load()).convertExternalLinksToFootnotes, true, source);
+    } finally { await rm(root, { recursive: true, force: true }); }
+  }
+});
+
+test('外链脚注开关参与内容相等、revision 冲突和幂等判断', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-revision-'));
+  const store = new TypesettingStore(path.join(root, '.data'));
+  try {
+    const saved = await store.save(documentWithTheme({ convertExternalLinksToFootnotes: false }));
+    assert.equal(await store.save({ ...saved }), saved);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true }), error => error.status === 409);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 0 }), error => error.status === 409);
+    await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: 'true', revision: 2 }), error => error.status === 400);
+
+    const enabled = await store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 2 });
+    assert.equal(enabled.convertExternalLinksToFootnotes, true);
+    assert.equal(await store.save({ ...enabled }), enabled);
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test('外链脚注开关写入任一提交阶段失败时旧值仍唯一可见', async () => {
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
+    const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-write-failure-'));
+    let failWrites = false;
+    let candidateWrites = 0;
+    const writeAtomically = async (file, text) => {
+      if (failWrites && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if (phase === 'current-version' && candidateWrites === 1 || phase === 'recovery-version' && candidateWrites === 2) throw new Error('disk denied');
+      }
+      if (failWrites && phase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
+      await writeFile(file, text, 'utf8');
+    };
+    const store = new TypesettingStore(path.join(root, '.data'), { writeAtomically });
+    try {
+      const saved = await store.save(documentWithTheme({ convertExternalLinksToFootnotes: false }));
+      const manifest = JSON.parse(await readFile(store.manifest, 'utf8'));
+      const persisted = {
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      };
+      failWrites = true;
+      candidateWrites = 0;
+      await assert.rejects(store.save({ ...saved, convertExternalLinksToFootnotes: true, revision: 2 }), /disk denied/);
+      assert.deepEqual({
+        manifest: await readFile(store.manifest, 'utf8'),
+        current: await readFile(path.join(store.versions, `${manifest.current}.json`), 'utf8'),
+        recovery: await readFile(path.join(store.versions, `${manifest.recovery}.json`), 'utf8')
+      }, persisted, phase);
+      assert.equal((await store.load()).convertExternalLinksToFootnotes, false, phase);
+      assert.equal((await new TypesettingStore(store.dataDir).load()).convertExternalLinksToFootnotes, false, phase);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
 });

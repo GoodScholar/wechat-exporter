@@ -50,7 +50,7 @@ export function normalizeTypesettingPresentation(value) {
 
 const emptyDocument = () => ({
   title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '',
-  theme: 'default', themeSettings: createDefaultThemeSettings()
+  theme: 'default', themeSettings: createDefaultThemeSettings(), convertExternalLinksToFootnotes: false
 });
 
 function normalizeDocument(value) {
@@ -69,6 +69,10 @@ function normalizeDocument(value) {
   if (hasTheme) {
     document.theme = normalizeTheme(value.theme);
     document.themeSettings = normalizeDocumentThemeSettings(value.themeSettings);
+  }
+  if (hasOwn(value, 'convertExternalLinksToFootnotes')) {
+    if (typeof value.convertExternalLinksToFootnotes !== 'boolean') return invalidDocument();
+    document.convertExternalLinksToFootnotes = value.convertExternalLinksToFootnotes;
   }
   return document;
 }
@@ -126,6 +130,7 @@ export class TypesettingStore {
       const next = normalizeDocument(input);
       const sameContent = fields.every(field => next[field] === current[field])
         && next.theme === current.theme
+        && next.convertExternalLinksToFootnotes === current.convertExternalLinksToFootnotes
         && typesettingThemeNames.every(theme => themeSettingKeys.every(key => next.themeSettings[theme][key] === current.themeSettings[theme][key]));
       if (next.revision < current.revision || (next.revision === current.revision && !sameContent)) {
         const error = new Error('文稿已更新，请刷新后重试');
