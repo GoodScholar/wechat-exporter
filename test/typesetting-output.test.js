@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFile } from 'node:fs/promises';
+import { load } from 'cheerio';
+import juice from 'juice';
 
 const readJson = async relativePath => JSON.parse(await readFile(new URL(relativePath, import.meta.url), 'utf8'));
 
@@ -31,6 +33,39 @@ const blockedResult = (normalizedPresentation, html = '', body = document.body) 
   diagnostics: [blocker(body)],
   blocked: true
 });
+const readyResult = (normalizedPresentation, html, diagnostics = []) => ({
+  html,
+  presentation: normalizedPresentation,
+  diagnostics,
+  blocked: false
+});
+const fixedJuiceOptions = {
+  applyStyleTags: true,
+  removeStyleTags: true,
+  inlinePseudoElements: false,
+  preserveFontFaces: false,
+  preserveMediaQueries: false,
+  preserveKeyFrames: false,
+  preservePseudos: false,
+  preserveImportant: false,
+  resolveCSSVariables: true,
+  applyWidthAttributes: false,
+  applyHeightAttributes: false,
+  xmlMode: false
+};
+const previewAllowedTags = [
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
+  'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby',
+  's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr',
+  'caption', 'col', 'colgroup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr'
+];
+
+function inlineRequiredImageStyles(html) {
+  const $ = load(html, null, false);
+  $('img').attr('style', 'display: block; max-width: 100%; height: auto;');
+  return $.root().html() || '';
+}
 
 async function loadOutputModule() {
   let module;
@@ -524,18 +559,247 @@ test('空 failed target 跨 renderer nonce 正常且 bundle 不泄漏新 target'
   }
 });
 
-test('输出 builder 在 Task 2 不伪造 ready 产物', async () => {
+test('三个主题和四项设置经固定 Juice options 形成无 class 变量 style 标签的 canonical body', async () => {
   const { createTypesettingOutputBuilder } = await loadOutputModule();
-  let inlineCalls = 0;
-  const build = createTypesettingOutputBuilder({
-    renderTypesetting: input => ({ html: '<p>正文</p>', presentation: input.presentation, diagnostics: [], blocked: false }),
-    inlineCss() {
-      inlineCalls += 1;
-      return '<p>伪产物</p>';
-    },
-    themeCss: 'fixed theme css'
-  });
+  const themeCss = await readFile(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
+  const settings = { primaryColor: '#FA5151', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' };
 
-  await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
-  assert.equal(inlineCalls, 0);
+  for (const theme of ['default', 'grace', 'simple']) {
+    const calls = [];
+    const currentPresentation = { theme, settings };
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, '<h1>标题</h1><p>正文</p>'),
+      inlineCss(html, css, options) {
+        calls.push({ html, css, options });
+        return juice(`<style>${css}</style>${html}`, options);
+      },
+      themeCss
+    });
+    const bundle = await build(outputRequest({ presentation: currentPresentation }));
+
+    assert.equal(bundle.status, 'ready');
+    assert.deepEqual(Object.keys(bundle).sort(), ['clipboard', 'html', 'markdown', 'schemaVersion', 'snapshot', 'status']);
+    assert.deepEqual(Object.keys(bundle.clipboard).sort(), ['html', 'plain']);
+    assert.deepEqual(bundle.clipboard.html.mimeType, 'text/html');
+    assert.deepEqual(bundle.clipboard.plain.mimeType, 'text/plain');
+    assert.deepEqual(Object.keys(bundle.html).sort(), ['content', 'filename', 'mimeType']);
+    assert.equal(calls.length, 1);
+    assert.equal(calls[0].css, themeCss);
+    assert.deepEqual(calls[0].options, fixedJuiceOptions);
+    assert.match(calls[0].html, new RegExp(`typeset-theme-${theme}`, 'u'));
+    assert.match(calls[0].html, /--md-primary-color:#FA5151/u);
+    const $full = load(bundle.html.content);
+    const canonical = $full('main > section');
+    assert.equal(canonical.length, 1);
+    assert.match(canonical.attr('style'), /font:\s*18px\/2\.05/iu);
+    assert.match(canonical.html(), /#FA5151/iu);
+    assert.match(canonical.html(), /calc\([^)]*\* 1\.35\)/iu);
+    assert.equal($full('main style, main [class], main [id], main [data-format-target], main [data-image-state]').length, 0);
+    assert.doesNotMatch($full('main').html(), /--md-|@media|@font-face|url\s*\(/iu);
+  }
+});
+
+test('输出标签集合、anchor URL、table span 与 Juice failure seam 严格遵守 canonical 白名单', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const specialMarkup = {
+    a: '<a href="../relative#part" title="标题">a</a>',
+    br: '<p>前<br>后</p>',
+    col: '<table><colgroup><col></colgroup><tbody><tr><td>x</td></tr></tbody></table>',
+    colgroup: '<table><colgroup><col></colgroup><tbody><tr><td>x</td></tr></tbody></table>',
+    caption: '<table><caption>x</caption><tbody><tr><td>x</td></tr></tbody></table>',
+    table: '<table><tbody><tr><td>x</td></tr></tbody></table>',
+    tbody: '<table><tbody><tr><td>x</td></tr></tbody></table>',
+    td: '<table><tbody><tr><td>x</td></tr></tbody></table>',
+    tfoot: '<table><tfoot><tr><td>x</td></tr></tfoot></table>',
+    th: '<table><thead><tr><th>x</th></tr></thead></table>',
+    thead: '<table><thead><tr><th>x</th></tr></thead></table>',
+    tr: '<table><tbody><tr><td>x</td></tr></tbody></table>',
+    dd: '<dl><dt>k</dt><dd>v</dd></dl>',
+    dt: '<dl><dt>k</dt><dd>v</dd></dl>',
+    figcaption: '<figure><figcaption>x</figcaption></figure>',
+    li: '<ul><li>x</li></ul>',
+    rb: '<ruby><rb>汉</rb><rt>hàn</rt></ruby>',
+    rp: '<ruby><rp>(</rp><rt>hàn</rt><rp>)</rp></ruby>',
+    rt: '<ruby><rb>汉</rb><rt>hàn</rt></ruby>',
+    rtc: '<ruby><rb>汉</rb><rtc>hàn</rtc></ruby>',
+    img: '<img src="https://images.example/image.png" alt="图" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="format-target-aaaaaaaaaaaaaaaaaaaaaaaa-1">'
+  };
+  const voidTags = new Set(['hr', 'wbr']);
+  for (const tag of previewAllowedTags) {
+    const html = specialMarkup[tag] || (voidTags.has(tag) ? `<${tag}>` : `<${tag}>x</${tag}>`);
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, html),
+      inlineCss: inlineRequiredImageStyles,
+      themeCss: ''
+    });
+    const bundle = await build(outputRequest());
+    const $ = load(bundle.clipboard.html.content, null, false);
+    assert.equal($(`section ${tag}`).length > 0 || (tag === 'section' && $('section').length === 1), true, tag);
+  }
+
+  for (const href of ['http://example.com/a', 'https://reader:secret@example.com/a', 'mailto:user@example.com', '../relative', '#fragment']) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, `<a href="${href}">链接</a>`),
+      inlineCss: html => html,
+      themeCss: ''
+    });
+    const bundle = await build(outputRequest());
+    assert.equal(load(bundle.clipboard.html.content, null, false)('a').attr('href'), href);
+  }
+
+  for (const href of ['java\nscript:alert(1)', 'java<!-- -->script:alert(1)', '//evil.example/a', '\\\\evil.example/a', 'ftp://example.com/a']) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, `<a href="${href}">链接</a>`),
+      inlineCss: html => html,
+      themeCss: ''
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+  }
+
+  for (const span of ['many', '0', '-2', '007', '999999999999999999999']) {
+    const html = `<table><tbody><tr><th colspan="${span}">甲</th><td rowspan="${span}">乙</td></tr></tbody></table>`;
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, html),
+      inlineCss: value => value,
+      themeCss: ''
+    });
+    const $ = load((await build(outputRequest())).clipboard.html.content, null, false);
+    assert.equal($('th').attr('colspan'), span);
+    assert.equal($('td').attr('rowspan'), span);
+  }
+
+  const failures = [
+    () => { throw new Error('juice sentinel /Users/private/file.css'); },
+    () => Promise.reject(new Error('juice rejected sentinel')),
+    () => null,
+    html => html.replace('<section ', '<video></video><section '),
+    html => html.replace('<section ', '<section onclick="evil()" '),
+    html => html.replace('<section ', '<section data-extra="evil" '),
+    html => html.replace('<section ', '<section style="position:absolute" '),
+    html => html.replace('<section ', '<section style="width:calc(evil)" '),
+    html => `${html}<!-- sanitizer drift -->`
+  ];
+  for (const inlineCss of failures) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, '<p>正文</p>'),
+      inlineCss,
+      themeCss: ''
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+  }
+});
+
+test('clipboard doocs 修正、图片安全样式、边界与 plain text 共享同一修正后正文', async () => {
+  const { buildTypesettingOutput, createTypesettingOutputBuilder } = await loadOutputModule();
+  const nested = '<ul><li>甲<ul><li>乙</li></ul><ol><li>丙</li></ol></li></ul>';
+  const nestedBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => readyResult(input.presentation, nested),
+    inlineCss: html => html,
+    themeCss: ''
+  });
+  const nestedBundle = await nestedBuild(outputRequest());
+  const $fullNested = load(nestedBundle.html.content);
+  assert.equal($fullNested('main section > ul > li > ul').length, 1);
+  assert.equal($fullNested('main section > ul > li > ol').length, 1);
+  const $clipboardNested = load(nestedBundle.clipboard.html.content, null, false);
+  assert.deepEqual($clipboardNested('section > ul').first().children().map((_, node) => node.tagName).get(), ['li', 'ul', 'ol']);
+
+  const imageBundle = await buildTypesettingOutput(outputRequest({
+    document: { ...document, body: '![图示](https://images.example/image.png)' }
+  }));
+  assert.equal(imageBundle.status, 'ready');
+  for (const content of [imageBundle.clipboard.html.content, imageBundle.html.content]) {
+    const $ = load(content);
+    const image = $('img');
+    assert.equal(image.length, 1);
+    assert.match(image.attr('style'), /(?:^|;)\s*display:\s*block(?:;|$)/iu);
+    assert.match(image.attr('style'), /(?:^|;)\s*max-width:\s*100%(?:;|$)/iu);
+    assert.match(image.attr('style'), /(?:^|;)\s*height:\s*auto(?:;|$)/iu);
+    assert.equal(image.attr('width'), undefined);
+    assert.equal(image.attr('height'), undefined);
+  }
+
+  const target = 'format-target-bbbbbbbbbbbbbbbbbbbbbbbb-1';
+  const failedBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => readyResult(input.presentation, `<p>前</p><img src="https://secret.example/private.png" alt="  替代   文本  " referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}"><p>后</p>`),
+    inlineCss: html => html,
+    themeCss: ''
+  });
+  const failedBundle = await failedBuild(outputRequest({ failedImageTargets: [target] }));
+  const $failed = load(failedBundle.clipboard.html.content, null, false);
+  assert.equal($failed('figure[role="note"] figcaption').text(), '图片加载失败。请检查图片地址后重试。 替代文本：替代 文本');
+  assert.equal($failed('img').length, 0);
+  assert.doesNotMatch(JSON.stringify(failedBundle), /secret\.example|private\.png/u);
+
+  const staticTarget = 'static-placeholder';
+  const staticDiagnostic = {
+    id: 'diagnostic-static-image', code: 'IMAGE_MISSING_SOURCE', severity: 'advisory', message: '图片缺少来源。',
+    targets: [{ kind: 'preview', id: staticTarget }]
+  };
+  const semanticHtml = [
+    '<h2>题</h2>',
+    '<p>段落   空白<br>换行 <code>内联</code> <a href="#footnote">链接<sup>[1]</sup></a></p>',
+    '<ul><li>甲<ul><li>乙</li></ul></li></ul>',
+    '<ol><li>一</li><li>二</li></ol>',
+    '<table><thead><tr><th>A</th><th>B</th></tr></thead><tbody><tr><td>1</td><td>2</td></tr></tbody></table>',
+    '<pre>  x\n y  </pre>',
+    '<p><img src="https://images.example/plain.png" alt="图示" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="format-target-cccccccccccccccccccccccc-1"></p>',
+    `<figure class="format-image-placeholder" data-format-target="${staticTarget}" tabindex="0" role="note">图片缺少来源。请补充 HTTPS 地址。</figure>`
+  ].join('');
+  const plainBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => readyResult(input.presentation, semanticHtml, [staticDiagnostic]),
+    inlineCss: inlineRequiredImageStyles,
+    themeCss: ''
+  });
+  const plainBundle = await plainBuild(outputRequest());
+  assert.equal(plainBundle.status, 'ready');
+  const plain = plainBundle.clipboard.plain.content;
+  assert.match(plain, /^题\n/u);
+  assert.match(plain, /段落 空白\n换行 内联 链接\[1\]/u);
+  assert.match(plain, /- 甲\n  - 乙/u);
+  assert.match(plain, /1\. 一\n2\. 二/u);
+  assert.match(plain, /A\tB\n1\t2/u);
+  assert.match(plain, /  x\n y/u);
+  assert.match(plain, /\[图片：图示\]/u);
+  assert.match(plain, /图片缺少来源。请补充 HTTPS 地址。/u);
+  assert.equal(plain.endsWith('\n'), false);
+  assert.doesNotMatch(plain, /输出标题|作者|公众号|2026-10-03|\u00a0/u);
+  const $clipboard = load(plainBundle.clipboard.html.content, null, false);
+  assert.equal($clipboard.root().children().length, 3);
+  assert.equal($clipboard.root().children().first().is('p'), true);
+  assert.equal($clipboard.root().children().first().text(), '\u00a0');
+  assert.equal($clipboard.root().children().last().is('p'), true);
+  assert.equal(load(plainBundle.html.content)('body > p').length, 0);
+});
+
+test('完整 HTML 有固定安全文档壳四项元信息和同一 canonical 正文', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const unsafeLookingDocument = {
+    title: '<img src=x onerror=alert(1)>',
+    author: '<script>alert(1)</script>',
+    account: '公众号 & "属性"',
+    publishedAt: '2026-10-03 <iframe>',
+    body: '# 正文 <script>alert(1)</script>\n\n[相对链接](../article)'
+  };
+  const bundle = await buildTypesettingOutput(outputRequest({ document: unsafeLookingDocument }));
+
+  assert.match(bundle.html.content, /^<!doctype html>/iu);
+  assert.equal(bundle.html.mimeType, 'text/html;charset=utf-8');
+  assert.equal(bundle.html.filename, '_img src=x onerror=alert(1)_.html');
+  const $ = load(bundle.html.content);
+  assert.equal($('html').attr('lang'), 'zh-CN');
+  assert.equal($('head').children().first().is('meta[charset="utf-8"]'), true);
+  assert.equal($('meta[name="viewport"]').attr('content'), 'width=device-width, initial-scale=1');
+  assert.equal($('head title').text(), unsafeLookingDocument.title);
+  assert.equal($('meta[http-equiv="Referrer-Policy"]').attr('content'), 'no-referrer');
+  assert.equal($('meta[http-equiv="Content-Security-Policy"]').attr('content'), "default-src 'none'; img-src https:; style-src 'unsafe-inline'; base-uri 'none'; form-action 'none'");
+  assert.equal($('header h1').text(), unsafeLookingDocument.title);
+  assert.deepEqual($('header dl dt').map((_, node) => $(node).text()).get(), ['作者', '公众号名称', '发布日期']);
+  assert.deepEqual($('header dl dd').map((_, node) => $(node).text()).get(), [unsafeLookingDocument.author, unsafeLookingDocument.account, unsafeLookingDocument.publishedAt]);
+  assert.equal($('main > section').length, 1);
+  assert.equal($('script, link, base, form, iframe, svg, math').length, 0);
+  assert.equal($('[onerror], [onclick], [target], [download], [contenteditable]').length, 0);
+  assert.equal($('main a').attr('href'), '../article');
+  assert.doesNotMatch(bundle.clipboard.html.content, /公众号 &|2026-10-03|<header/iu);
+  assert.doesNotMatch(bundle.clipboard.plain.content, /公众号 &|2026-10-03|作者/iu);
 });

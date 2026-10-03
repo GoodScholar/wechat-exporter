@@ -1,6 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { load } from 'cheerio';
 import juice from 'juice';
+import sanitizeHtml from 'sanitize-html';
 import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
 import { renderTypesettingMarkdown } from './typesetting-render.js';
 
@@ -11,6 +12,32 @@ const themeSettingKeys = Object.freeze(['primaryColor', 'fontSize', 'lineHeight'
 const imageDiagnosticCodes = Object.freeze(['IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE']);
 const specialContentTypes = Object.freeze(['video', 'audio', 'embed', 'mini-program', 'poll']);
 const imageAttributeKeys = Object.freeze(['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target']);
+const previewAllowedTags = Object.freeze([
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
+  'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'br', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt', 'rtc', 'ruby',
+  's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var', 'wbr',
+  'caption', 'col', 'colgroup', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr'
+]);
+const previewAllowedTagSet = new Set(previewAllowedTags);
+const allowedStyleProperties = new Set([
+  'color', 'background', 'background-color', 'font', 'font-family', 'font-size', 'font-weight', 'font-style', 'line-height',
+  'letter-spacing', 'text-align', 'text-decoration', 'text-underline-offset', 'white-space', 'overflow-wrap', 'word-break',
+  'vertical-align', 'display', 'width', 'max-width', 'height', 'max-height', 'margin', 'margin-top', 'margin-right',
+  'margin-bottom', 'margin-left', 'padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'border',
+  'border-top', 'border-right', 'border-bottom', 'border-left', 'border-width', 'border-style', 'border-color', 'border-radius',
+  'border-collapse', 'table-layout', 'list-style-type', 'overflow'
+]);
+const blockPlainTextTags = new Set([
+  'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
+  'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'p'
+]);
+const structuralWhitespaceParents = new Set([
+  'article', 'aside', 'body', 'div', 'footer', 'header', 'hgroup', 'main', 'nav', 'section', 'table', 'tbody', 'tfoot', 'thead', 'tr'
+]);
+const allowedStyleKeywords = new Set([
+  'auto', 'block', 'table', 'none', 'solid', 'dashed', 'collapse', 'center', 'underline', 'anywhere', 'currentcolor', 'sans-serif'
+]);
 const controlledImageTarget = /^format-target-[a-f0-9]{24}-[1-9]\d*$/u;
 const fixedTypesettingThemeCss = readFileSync(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
 const fixedJuiceOptions = Object.freeze({
@@ -271,6 +298,341 @@ function prepareRenderedHtml($, failedImageTargets) {
   return $.root().html() || '';
 }
 
+function themeRootHtml(html, presentation) {
+  const { theme, settings } = presentation;
+  const variables = [
+    `--md-primary-color:${settings.primaryColor}`,
+    `--md-font-size:${settings.fontSize}`,
+    `--md-line-height:${settings.lineHeight}`,
+    `--md-block-spacing:${settings.blockSpacing}`
+  ].join(';');
+  return `<section class="typeset-preview typeset-theme-${theme}" style="${variables}">${html}</section>`;
+}
+
+function splitStyleDeclarations(style) {
+  const declarations = [];
+  let current = '';
+  let quote = '';
+  let depth = 0;
+  for (const character of style) {
+    if (quote) {
+      current += character;
+      if (character === quote) quote = '';
+      continue;
+    }
+    if (character === '"' || character === "'") {
+      quote = character;
+      current += character;
+    } else if (character === '(') {
+      depth += 1;
+      current += character;
+    } else if (character === ')') {
+      depth -= 1;
+      if (depth < 0) throw outputError('OUTPUT_GENERATION_FAILED');
+      current += character;
+    } else if (character === ';' && depth === 0) {
+      if (current.trim()) declarations.push(current.trim());
+      current = '';
+    } else {
+      current += character;
+    }
+  }
+  if (quote || depth !== 0) throw outputError('OUTPUT_GENERATION_FAILED');
+  if (current.trim()) declarations.push(current.trim());
+  return declarations;
+}
+
+function hasSafeStyleValue(value) {
+  if (!value || /[\u0000-\u001f\u007f\\{};<>@!]/u.test(value)
+    || /(?:url\s*\(|@import|expression|javascript\s*:|data\s*:|blob\s*:|var\s*\(|env\s*\(|attr\s*\(|behavior)/iu.test(value)
+    || !/^[\p{L}\p{N}\s#.,'"%+\-*/()]+$/u.test(value)) return false;
+  let remaining = value.replace(/calc\(\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:px|em|rem|%)\s*\*\s*[+-]?(?:\d+(?:\.\d+)?|\.\d+)\s*\)/giu, ' 0px ');
+  remaining = remaining
+    .replace(/'(?:PingFang SC|Microsoft YaHei)'/gu, ' known-font ')
+    .replace(/"(?:PingFang SC|Microsoft YaHei)"/gu, ' known-font ');
+  if (/[()'"]/u.test(remaining)) return false;
+  const tokens = remaining.split(/[\s,/]+/u).filter(Boolean);
+  return tokens.length > 0 && tokens.every(token => /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/iu.test(token)
+    || /^[+-]?(?:\d+(?:\.\d+)?|\.\d+)(?:px|em|rem|%)?$/u.test(token)
+    || token === 'known-font' || allowedStyleKeywords.has(token.toLowerCase()));
+}
+
+function normalizeStyle(style, { removeVariables = false } = {}) {
+  const normalized = [];
+  const seen = new Set();
+  for (const declaration of splitStyleDeclarations(style)) {
+    const separator = declaration.indexOf(':');
+    if (separator <= 0) throw outputError('OUTPUT_GENERATION_FAILED');
+    const property = declaration.slice(0, separator).trim().toLowerCase();
+    const value = declaration.slice(separator + 1).trim();
+    if (removeVariables && property.startsWith('--')) continue;
+    if (!allowedStyleProperties.has(property) || seen.has(property) || !hasSafeStyleValue(value)) {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+    seen.add(property);
+    normalized.push(`${property}: ${value}`);
+  }
+  return normalized.join('; ');
+}
+
+function hasAllowedHref(href) {
+  const classified = href.replace(/[\u0000-\u0020]/gu, '').replace(/<!--[\s\S]*?-->/gu, '');
+  if (/^[\\/]{2}/u.test(classified)) return false;
+  const scheme = /^([a-zA-Z][a-zA-Z0-9.\-+]*):/u.exec(classified);
+  return !scheme || ['http', 'https', 'mailto'].includes(scheme[1].toLowerCase());
+}
+
+function hasSafeImageSource(source) {
+  try {
+    const url = new URL(source);
+    return url.protocol === 'https:' && url.username === '' && url.password === '';
+  } catch {
+    return false;
+  }
+}
+
+function allowedAttributesFor(tagName) {
+  const attributes = new Set(['style']);
+  if (tagName === 'a') for (const name of ['href', 'title']) attributes.add(name);
+  if (tagName === 'img') for (const name of ['src', 'alt', 'referrerpolicy']) attributes.add(name);
+  if (tagName === 'th' || tagName === 'td') for (const name of ['colspan', 'rowspan']) attributes.add(name);
+  if (tagName === 'blockquote' || tagName === 'figure') attributes.add('role');
+  return attributes;
+}
+
+function cleanCanonicalRuntimeAttributes($) {
+  $('*').each((_, element) => {
+    const node = $(element);
+    node.removeAttr('class');
+    node.removeAttr('id');
+    node.removeAttr('data-format-target');
+    node.removeAttr('data-image-state');
+    if ((element.tagName === 'blockquote' || element.tagName === 'figure') && node.attr('role') === 'note') {
+      node.removeAttr('tabindex');
+    }
+    const style = node.attr('style');
+    if (style === undefined) return;
+    const normalized = normalizeStyle(style, { removeVariables: true });
+    if (normalized) node.attr('style', normalized);
+    else node.removeAttr('style');
+  });
+}
+
+function validateSafeNodes($) {
+  const inspect = node => {
+    if (node.type === 'text') return;
+    if (node.type !== 'tag') throw outputError('OUTPUT_GENERATION_FAILED');
+    const tagName = node.tagName.toLowerCase();
+    if (!previewAllowedTagSet.has(tagName)) throw outputError('OUTPUT_GENERATION_FAILED');
+    const allowedAttributes = allowedAttributesFor(tagName);
+    for (const [name, value] of Object.entries(node.attribs)) {
+      if (!allowedAttributes.has(name)) throw outputError('OUTPUT_GENERATION_FAILED');
+      if (name === 'style' && normalizeStyle(value) !== value.replace(/;\s*$/u, '').trim()) {
+        throw outputError('OUTPUT_GENERATION_FAILED');
+      }
+      if (name === 'href' && !hasAllowedHref(value)) throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+    const element = $(node);
+    if (tagName === 'img' && (!hasOwn(node.attribs, 'src') || !hasOwn(node.attribs, 'alt')
+      || node.attribs.referrerpolicy !== 'no-referrer' || !hasSafeImageSource(node.attribs.src))) {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+    if (hasOwn(node.attribs, 'role') && (node.attribs.role !== 'note' || !element.is('blockquote, figure'))) {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+    for (const child of node.children || []) inspect(child);
+  };
+  for (const node of $.root().contents().toArray()) {
+    if (node.type === 'text' && /^\s*$/u.test(node.data || '')) continue;
+    inspect(node);
+  }
+}
+
+function normalizedDom($) {
+  const normalizeNode = node => {
+    if (node.type === 'text') return ['text', node.data || ''];
+    if (node.type !== 'tag') return [node.type];
+    return [
+      'tag',
+      node.tagName.toLowerCase(),
+      Object.entries(node.attribs)
+        .map(([name, value]) => [name, name === 'style' ? normalizeStyle(value) : value])
+        .sort(([left], [right]) => left.localeCompare(right)),
+      (node.children || []).map(normalizeNode)
+    ];
+  };
+  return $.root().contents().toArray()
+    .filter(node => !(node.type === 'text' && /^\s*$/u.test(node.data || '')))
+    .map(normalizeNode);
+}
+
+const finalSanitizerOptions = Object.freeze({
+  allowedTags: [...previewAllowedTags],
+  allowedAttributes: {
+    '*': ['style'],
+    a: ['href', 'title', 'style'],
+    img: ['src', 'alt', 'referrerpolicy', 'style'],
+    blockquote: ['role', 'style'],
+    figure: ['role', 'style'],
+    th: ['colspan', 'rowspan', 'style'],
+    td: ['colspan', 'rowspan', 'style']
+  },
+  allowedSchemes: ['http', 'https', 'mailto'],
+  allowedSchemesByTag: { img: ['https'] },
+  allowProtocolRelative: false,
+  enforceHtmlBoundary: true
+});
+
+function assertSanitizerConsistency(html, $) {
+  let sanitized;
+  try {
+    sanitized = sanitizeHtml(html, finalSanitizerOptions);
+  } catch {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
+  const sanitizedDom = parseRenderedHtml(sanitized);
+  if (JSON.stringify(normalizedDom($)) !== JSON.stringify(normalizedDom(sanitizedDom))) {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
+}
+
+function parseSingleSection(html, { clean = false } = {}) {
+  const $ = parseRenderedHtml(html);
+  const significantRoots = $.root().contents().toArray()
+    .filter(node => !(node.type === 'text' && /^\s*$/u.test(node.data || '')));
+  if (significantRoots.length !== 1 || significantRoots[0].type !== 'tag' || significantRoots[0].tagName !== 'section') {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
+  if (clean) cleanCanonicalRuntimeAttributes($);
+  validateSafeNodes($);
+  const serialized = $.root().html() || '';
+  assertSanitizerConsistency(serialized, $);
+  return { $, serialized };
+}
+
+// Adapted from doocs/md@a7c17fc4cda92e3c13aa7e24f06615cfa4219b31
+// clipboard-dom.ts modifyHtmlStructure(); adapted to Cheerio and stable multi-list order.
+function modifyHtmlStructure($) {
+  for (const item of $('li').toArray()) {
+    const childLists = $(item).children('ul, ol').toArray();
+    if (childLists.length > 0) $(item).after(childLists);
+  }
+}
+
+// Adapted from the same fixed doocs clipboard-dom.ts solveWeChatImage().
+// Current canonical input has no width/height attributes; this remains a conditional compatibility step.
+function solveWeChatImage($) {
+  $('img').each((_, element) => {
+    const image = $(element);
+    const migrated = [];
+    for (const name of ['width', 'height']) {
+      const value = image.attr(name);
+      if (!value) continue;
+      image.removeAttr(name);
+      const length = /^\d+$/u.test(value) ? `${value}px` : value;
+      if (!/^(?:\d+(?:\.\d+)?(?:px|em|rem|%)|auto)$/u.test(length)) throw outputError('OUTPUT_GENERATION_FAILED');
+      migrated.push(`${name}: ${length}`);
+    }
+    if (migrated.length === 0) return;
+    const existing = image.attr('style');
+    image.attr('style', [existing, ...migrated].filter(Boolean).join('; '));
+  });
+}
+
+function assertClipboardImages($) {
+  $('img').each((_, element) => {
+    const image = $(element);
+    if (image.attr('width') !== undefined || image.attr('height') !== undefined) throw outputError('OUTPUT_GENERATION_FAILED');
+    const declarations = new Map(splitStyleDeclarations(image.attr('style') || '').map(declaration => {
+      const separator = declaration.indexOf(':');
+      return [declaration.slice(0, separator).trim().toLowerCase(), declaration.slice(separator + 1).trim().toLowerCase()];
+    }));
+    if (declarations.get('display') !== 'block' || declarations.get('max-width') !== '100%' || declarations.get('height') !== 'auto') {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+  });
+}
+
+// Adapted from the same fixed doocs clipboard-dom.ts createEmptyNode().
+function createEmptyNode() {
+  return '<p style="font-size:0;line-height:0;margin:0">&nbsp;</p>';
+}
+
+function renderInlinePlainText($, nodes, depth) {
+  return nodes.map(node => renderPlainTextNode($, node, depth)).join('');
+}
+
+function renderListPlainText($, list, depth) {
+  const ordered = list.tagName === 'ol';
+  const rawStart = $(list).attr('start');
+  let number = /^-?\d+$/u.test(rawStart || '') ? Number(rawStart) : 1;
+  let output = '';
+  for (const child of $(list).contents().toArray()) {
+    if (child.type === 'text') continue;
+    if (child.type !== 'tag') continue;
+    if (child.tagName === 'li') {
+      const inlineNodes = $(child).contents().toArray().filter(node => node.type !== 'tag' || (node.tagName !== 'ul' && node.tagName !== 'ol'));
+      const text = renderInlinePlainText($, inlineNodes, depth).replace(/\s+/gu, ' ').trim();
+      output += `${'  '.repeat(depth)}${ordered ? `${number}. ` : '- '}${text}\n`;
+      number += 1;
+      for (const nested of $(child).children('ul, ol').toArray()) output += renderListPlainText($, nested, depth + 1);
+    } else if (child.tagName === 'ul' || child.tagName === 'ol') {
+      output += renderListPlainText($, child, depth + 1);
+    }
+  }
+  return output;
+}
+
+function renderTablePlainText($, table, depth) {
+  let output = '';
+  for (const row of $(table).find('tr').toArray()) {
+    const cells = $(row).children('th, td').toArray().map(cell => renderInlinePlainText($, $(cell).contents().toArray(), depth)
+      .replace(/\s+/gu, ' ').trim());
+    output += `${cells.join('\t')}\n`;
+  }
+  return output;
+}
+
+function renderPlainTextNode($, node, depth = 0) {
+  if (node.type === 'text') {
+    const value = (node.data || '').replace(/[\s\u00a0]+/gu, ' ');
+    if (!value.trim() && structuralWhitespaceParents.has(node.parent?.tagName)) return '';
+    return value;
+  }
+  if (node.type !== 'tag') return '';
+  const tagName = node.tagName.toLowerCase();
+  if (tagName === 'br') return '\n';
+  if (tagName === 'img') {
+    const alt = ($(node).attr('alt') || '').replace(/\s+/gu, ' ').trim();
+    return alt ? `[图片：${alt}]` : '[图片]';
+  }
+  if (tagName === 'pre') return `${$(node).text()}\n`;
+  if (tagName === 'code') return $(node).text();
+  if (tagName === 'ul' || tagName === 'ol') return renderListPlainText($, node, depth);
+  if (tagName === 'table') return renderTablePlainText($, node, depth);
+  const content = renderInlinePlainText($, $(node).contents().toArray(), depth);
+  return blockPlainTextTags.has(tagName) ? `${content}\n` : content;
+}
+
+function buildPlainText($) {
+  return renderInlinePlainText($, $.root().contents().toArray(), 0)
+    .split('\n')
+    .map(line => line.replace(/[ \t]+$/u, ''))
+    .join('\n')
+    .replace(/\n{3,}/gu, '\n\n')
+    .replace(/^\n+|\n+$/gu, '');
+}
+
+function buildFullHtml(document, canonicalInlineBody) {
+  const $ = load('<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title></title><meta http-equiv="Referrer-Policy" content="no-referrer"><meta http-equiv="Content-Security-Policy" content="default-src \'none\'; img-src https:; style-src \'unsafe-inline\'; base-uri \'none\'; form-action \'none\'"></head><body><header><h1></h1><dl><dt>作者</dt><dd></dd><dt>公众号名称</dt><dd></dd><dt>发布日期</dt><dd></dd></dl></header><main></main></body></html>');
+  $('head title').text(document.title);
+  $('header h1').text(document.title);
+  const metadata = [document.author, document.account, document.publishedAt];
+  $('header dd').each((index, element) => $(element).text(metadata[index]));
+  $('main').html(canonicalInlineBody);
+  return `<!doctype html>${$.html('html')}`;
+}
+
 function defaultJuiceAdapter(html, themeCss, options) {
   return juice(`<style>${themeCss}</style>${html}`, options);
 }
@@ -306,17 +668,54 @@ export function createTypesettingOutputBuilder({
     if (result.blocked !== result.diagnostics.some(item => item.severity === 'blocker')) {
       throw outputError('OUTPUT_GENERATION_FAILED');
     }
-    prepareRenderedHtml($, snapshot.failedImageTargets);
+    const preparedHtml = prepareRenderedHtml($, snapshot.failedImageTargets);
+    const markdown = buildNormalizedMarkdown(snapshot.document);
 
-    if (!result.blocked) throw outputError('OUTPUT_GENERATION_FAILED');
-    return {
-      schemaVersion: 1,
-      status: 'blocked',
-      snapshot,
-      markdown: buildNormalizedMarkdown(snapshot.document),
-      clipboard: null,
-      html: null
-    };
+    if (result.blocked) {
+      return {
+        schemaVersion: 1,
+        status: 'blocked',
+        snapshot,
+        markdown,
+        clipboard: null,
+        html: null
+      };
+    }
+
+    try {
+      const inlined = await inlineCss(themeRootHtml(preparedHtml, snapshot.presentation), themeCss, fixedJuiceOptions);
+      if (typeof inlined !== 'string') throw outputError('OUTPUT_GENERATION_FAILED');
+      const canonical = parseSingleSection(inlined, { clean: true });
+      const canonicalInlineBody = canonical.serialized;
+      const fullHtml = buildFullHtml(snapshot.document, canonicalInlineBody);
+
+      const clipboard = parseSingleSection(canonicalInlineBody);
+      modifyHtmlStructure(clipboard.$);
+      solveWeChatImage(clipboard.$);
+      assertClipboardImages(clipboard.$);
+      const correctedHtml = clipboard.$.root().html() || '';
+      const corrected = parseSingleSection(correctedHtml);
+      const plainText = buildPlainText(corrected.$);
+      const clipboardHtml = `${createEmptyNode()}${corrected.serialized}${createEmptyNode()}`;
+
+      return {
+        schemaVersion: 1,
+        status: 'ready',
+        snapshot,
+        markdown,
+        clipboard: {
+          html: { mimeType: 'text/html', content: clipboardHtml },
+          plain: { mimeType: 'text/plain', content: plainText }
+        },
+        html: {
+          mimeType: 'text/html;charset=utf-8',
+          filename: `${safeOutputBaseName(snapshot.document.title)}.html`,
+          content: fullHtml
+        }
+      };
+    } catch {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
   };
 }
 
