@@ -575,6 +575,13 @@ test('仅排版页 CSP 允许 self 与 HTTPS 图片并拒绝 http data blob', as
     assert.equal(aliasResponse.headers.get('location'), '/typesetting');
     assert.deepEqual(imageSources(aliasResponse), ["'self'", 'https:']);
     assert.equal(aliasResponse.headers.get('referrer-policy'), 'no-referrer');
+    for (const aliasPath of ['/typesetting%2ehtml', '/typesetting%2Ehtml', '/%74ypesetting.html']) {
+      const encodedAliasResponse = await fetch(server.base + aliasPath, { redirect: 'manual' });
+      assert.ok([200, 308].includes(encodedAliasResponse.status), aliasPath);
+      if (encodedAliasResponse.status === 308) assert.equal(encodedAliasResponse.headers.get('location'), '/typesetting', aliasPath);
+      assert.deepEqual(imageSources(encodedAliasResponse), ["'self'", 'https:'], aliasPath);
+      assert.equal(encodedAliasResponse.headers.get('referrer-policy'), 'no-referrer', aliasPath);
+    }
     assert.doesNotMatch(await typesettingResponse.text(), /<link rel="icon" href="data:/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

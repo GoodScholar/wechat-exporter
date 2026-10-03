@@ -156,7 +156,11 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   });
   app.get('/typesetting', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.sendFile('typesetting.html', { root: path.join(root, 'public') }); });
   app.get('/typesetting.html', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.redirect(308, '/typesetting'); });
-  app.use(express.static(path.join(root, 'public')));
+  app.use(express.static(path.join(root, 'public'), {
+    setHeaders(res, filePath) {
+      if (filePath === path.join(root, 'public', 'typesetting.html')) res.set('Content-Security-Policy', typesettingContentSecurityPolicy);
+    }
+  }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (req.path === '/api/typesetting/rich-text' && error.type === 'entity.too.large') {
