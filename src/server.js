@@ -155,6 +155,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     stream.pipe(res);
   });
   app.get('/typesetting', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.sendFile('typesetting.html', { root: path.join(root, 'public') }); });
+  app.get('/typesetting.html', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.redirect(308, '/typesetting'); });
   app.use(express.static(path.join(root, 'public')));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);

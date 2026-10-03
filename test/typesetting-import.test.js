@@ -565,11 +565,16 @@ test('仅排版页 CSP 允许 self 与 HTTPS 图片并拒绝 http data blob', as
   try {
     const exportResponse = await fetch(server.base + '/');
     const typesettingResponse = await fetch(server.base + '/typesetting');
+    const aliasResponse = await fetch(server.base + '/typesetting.html', { redirect: 'manual' });
     const imageSources = response => response.headers.get('content-security-policy').split(';')
       .map(directive => directive.trim().split(/\s+/)).find(([name]) => name === 'img-src').slice(1);
     assert.deepEqual(imageSources(exportResponse), ["'self'", 'data:']);
     assert.deepEqual(imageSources(typesettingResponse), ["'self'", 'https:']);
     assert.equal(typesettingResponse.headers.get('referrer-policy'), 'no-referrer');
+    assert.equal(aliasResponse.status, 308);
+    assert.equal(aliasResponse.headers.get('location'), '/typesetting');
+    assert.deepEqual(imageSources(aliasResponse), ["'self'", 'https:']);
+    assert.equal(aliasResponse.headers.get('referrer-policy'), 'no-referrer');
     assert.doesNotMatch(await typesettingResponse.text(), /<link rel="icon" href="data:/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
