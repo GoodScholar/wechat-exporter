@@ -60,6 +60,7 @@ let outputFresh = false;
 let outputPending = false;
 let outputBundle;
 let outputCache;
+let outputActionToken = 0;
 const failedImageTargets = new Set();
 let staticDiagnostics = [];
 let dynamicImageDiagnostics = [];
@@ -169,6 +170,7 @@ function outputSnapshot() {
   };
 }
 function invalidateOutput() {
+  outputActionToken++;
   outputVersion++;
   outputFresh = false;
   outputPending = false;
@@ -244,6 +246,11 @@ function clearOutputMessages() {
   outputControls.status.textContent = '';
   outputControls.error.textContent = '';
 }
+function startOutputAction() {
+  const token = ++outputActionToken;
+  clearOutputMessages();
+  return token;
+}
 function syncOutputControls(state = '') {
   const ready = hasFreshReadyOutput();
   outputControls.copyWechat.disabled = !ready;
@@ -265,57 +272,73 @@ function syncOutputControls(state = '') {
   }
   if (ready) outputControls.status.textContent = '输出已准备';
 }
-function showOutputSuccess(message) {
+function showOutputSuccess(token, message) {
+  if (token !== outputActionToken) return;
   outputControls.status.textContent = message;
   outputControls.error.textContent = '';
 }
-function showOutputFailure(message) {
+function showOutputFailure(token, message) {
+  if (token !== outputActionToken) return;
   outputControls.status.textContent = '';
   outputControls.error.textContent = message;
 }
+function currentRichOutputAction(action) {
+  return action.token === outputActionToken && hasFreshReadyOutput()
+    && action.outputVersion === outputVersion
+    && action.renderVersion === appliedRenderVersion && action.renderVersion === previewVersion
+    && action.bundle === outputBundle && action.cache === outputCache
+    && sameOutputSnapshot(action.snapshot, outputSnapshot());
+}
 async function copyWechatOutput() {
-  clearOutputMessages();
+  const token = startOutputAction();
   if (!hasFreshReadyOutput()) {
-    showOutputFailure('富文本输出尚未准备好，请复制或下载 Markdown。');
+    showOutputFailure(token, '富文本输出尚未准备好，请复制或下载 Markdown。');
     return;
   }
-  const bundle = outputBundle;
+  const action = {
+    token,
+    outputVersion,
+    renderVersion: appliedRenderVersion,
+    snapshot: outputSnapshot(),
+    bundle: outputBundle,
+    cache: outputCache
+  };
   try {
     if (window.isSecureContext !== true || typeof navigator.clipboard?.write !== 'function'
       || typeof window.ClipboardItem !== 'function') throw new Error('clipboard unsupported');
     if (typeof window.ClipboardItem.supports === 'function'
       && (!window.ClipboardItem.supports('text/html') || !window.ClipboardItem.supports('text/plain'))) throw new Error('clipboard MIME unsupported');
     const item = new window.ClipboardItem({
-      'text/html': new Blob([bundle.clipboard.html.content], { type: bundle.clipboard.html.mimeType }),
-      'text/plain': new Blob([bundle.clipboard.plain.content], { type: bundle.clipboard.plain.mimeType })
+      'text/html': new Blob([action.bundle.clipboard.html.content], { type: action.bundle.clipboard.html.mimeType }),
+      'text/plain': new Blob([action.bundle.clipboard.plain.content], { type: action.bundle.clipboard.plain.mimeType })
     });
     await navigator.clipboard.write([item]);
-    showOutputSuccess('已复制正文富文本');
+    if (currentRichOutputAction(action)) showOutputSuccess(token, '已复制正文富文本');
   } catch {
-    showOutputFailure('未能复制富文本，请复制 Markdown 或下载 HTML');
+    if (currentRichOutputAction(action)) showOutputFailure(token, '未能复制富文本，请复制 Markdown 或下载 HTML');
   }
 }
 async function copyMetadataField(name) {
-  clearOutputMessages();
+  const token = startOutputAction();
   const label = metadataFieldNames[name];
   const value = fields[name].value;
   try {
     if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
     await navigator.clipboard.writeText(value);
-    showOutputSuccess(`已复制${label}`);
+    showOutputSuccess(token, `已复制${label}`);
   } catch {
-    showOutputFailure(`未能复制${label}`);
+    showOutputFailure(token, `未能复制${label}`);
   }
 }
 async function copyMarkdownOutput() {
-  clearOutputMessages();
+  const token = startOutputAction();
   const artifact = currentMarkdownArtifact();
   try {
     if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
     await navigator.clipboard.writeText(artifact.content);
-    showOutputSuccess('已复制 Markdown');
+    showOutputSuccess(token, '已复制 Markdown');
   } catch {
-    showOutputFailure('未能复制 Markdown，请下载 Markdown');
+    showOutputFailure(token, '未能复制 Markdown，请下载 Markdown');
   }
 }
 function downloadArtifact(artifact) {
@@ -332,25 +355,25 @@ function downloadArtifact(artifact) {
   }, 0);
 }
 function downloadHtmlOutput() {
-  clearOutputMessages();
+  const token = startOutputAction();
   if (!hasFreshReadyOutput()) {
-    showOutputFailure('HTML 输出尚未准备好，请下载 Markdown。');
+    showOutputFailure(token, 'HTML 输出尚未准备好，请下载 Markdown。');
     return;
   }
   try {
     downloadArtifact(outputBundle.html);
-    showOutputSuccess('已下载 HTML');
+    showOutputSuccess(token, '已下载 HTML');
   } catch {
-    showOutputFailure('未能下载 HTML，请下载 Markdown。');
+    showOutputFailure(token, '未能下载 HTML，请下载 Markdown。');
   }
 }
 function downloadMarkdownOutput() {
-  clearOutputMessages();
+  const token = startOutputAction();
   try {
     downloadArtifact(currentMarkdownArtifact());
-    showOutputSuccess('已下载 Markdown');
+    showOutputSuccess(token, '已下载 Markdown');
   } catch {
-    showOutputFailure('未能下载 Markdown');
+    showOutputFailure(token, '未能下载 Markdown');
   }
 }
 for (const button of document.querySelectorAll('[data-copy-field]')) {

@@ -136,6 +136,7 @@ function installOutputBrowserSpies() {
   window.__clipboardWrites = [];
   window.__writeTextCalls = [];
   window.__pendingClipboardWrites = [];
+  window.__pendingWriteTexts = [];
   window.__execCommandCalls = 0;
   document.execCommand = () => { window.__execCommandCalls++; return true; };
   class TestClipboardItem {
@@ -160,6 +161,7 @@ function installOutputBrowserSpies() {
         window.__writeTextCalls.push(value);
         if (window.__writeTextMode === 'throw') throw new Error('writeText throw');
         if (window.__writeTextMode === 'reject') return Promise.reject(new Error('writeText reject'));
+        if (window.__writeTextMode === 'pending') return new Promise((resolve, reject) => window.__pendingWriteTexts.push({ resolve, reject, value }));
         return Promise.resolve();
       }
     }
@@ -771,4 +773,103 @@ test('Markdown 复制与 Blob 下载严格使用当前 artifact 且 HTML 重查 
   assert.equal(staleDownload.blobs, beforeStale.blobs + 1, 'stale HTML 点击不得创建 Blob');
   assert.equal(staleDownload.clicks, beforeStale.clicks + 1, 'stale HTML 点击不得创建 anchor');
   assert.equal(staleDownload.openCalls, 0);
+});
+
+test('rich pending 后编辑使动作失效且 resolve 不产生幽灵提示', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('幽灵提示');
+  await waitForReadyOutput(page);
+
+  await page.evaluate(() => { window.__clipboardMode = 'pending'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => window.__pendingClipboardWrites.length === 1);
+  await page.getByLabel('标题').fill('输出已失效');
+  await page.evaluate(() => window.__pendingClipboardWrites[0].resolve());
+  await page.waitForTimeout(40);
+  assert.notEqual(await page.locator('#output-status').textContent(), '已复制正文富文本');
+  assert.doesNotMatch(await page.locator('#output-error').textContent(), /未能复制富文本/u);
+});
+
+test('两次 rich 乱序 settle 只允许最新动作提示且 write 严格接收构造 item', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('两次 rich');
+  await waitForReadyOutput(page);
+
+  await page.evaluate(() => { window.__clipboardMode = 'pending'; });
+  await page.locator('#copy-wechat').click();
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => window.__pendingClipboardWrites.length === 2);
+  assert.deepEqual(await page.evaluate(() => ({
+    itemCount: window.__clipboardItems.length,
+    writeCount: window.__clipboardWrites.length,
+    firstWriteLength: window.__clipboardWrites[0].length,
+    secondWriteLength: window.__clipboardWrites[1].length,
+    firstIdentity: window.__clipboardWrites[0][0] === window.__clipboardItems[0],
+    secondIdentity: window.__clipboardWrites[1][0] === window.__clipboardItems[1],
+    firstTypes: Object.keys(window.__clipboardItems[0].types).sort(),
+    secondTypes: Object.keys(window.__clipboardItems[1].types).sort()
+  })), {
+    itemCount: 2,
+    writeCount: 2,
+    firstWriteLength: 1,
+    secondWriteLength: 1,
+    firstIdentity: true,
+    secondIdentity: true,
+    firstTypes: ['text/html', 'text/plain'],
+    secondTypes: ['text/html', 'text/plain']
+  });
+  await page.evaluate(() => window.__pendingClipboardWrites[1].resolve());
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制正文富文本');
+  await page.evaluate(() => window.__pendingClipboardWrites[0].reject(new Error('old reject')));
+  await page.waitForTimeout(40);
+  assert.equal(await page.locator('#output-status').textContent(), '已复制正文富文本');
+  assert.equal(await page.locator('#output-error').textContent(), '');
+});
+
+test('rich 旧 reject 不得覆盖较新 metadata 成功', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('标题').fill('当前标题');
+  await page.getByLabel('Markdown 正文').fill('rich 旧失败');
+  await waitForReadyOutput(page);
+
+  await page.evaluate(() => { window.__clipboardMode = 'pending'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => window.__pendingClipboardWrites.length === 1);
+  await page.getByRole('button', { name: '复制标题', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制标题');
+  await page.evaluate(() => window.__pendingClipboardWrites[0].reject(new Error('old reject')));
+  await page.waitForTimeout(40);
+  assert.equal(await page.locator('#output-status').textContent(), '已复制标题');
+  assert.equal(await page.locator('#output-error').textContent(), '');
+});
+
+test('Markdown 与 metadata writeText 乱序 settle 不得让旧结果覆盖新动作', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('作者').fill('当前作者');
+  await page.getByLabel('Markdown 正文').fill('writeText 乱序');
+  await waitForReadyOutput(page);
+
+  await page.evaluate(() => { window.__writeTextMode = 'pending'; });
+  await page.getByRole('button', { name: '复制作者', exact: true }).click();
+  await page.locator('#copy-markdown').click();
+  await page.waitForFunction(() => window.__pendingWriteTexts.length === 2);
+  assert.deepEqual(await page.evaluate(() => window.__pendingWriteTexts.map(item => item.value)), ['当前作者', 'SERVER:writeText 乱序']);
+  await page.evaluate(() => window.__pendingWriteTexts[1].resolve());
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制 Markdown');
+  await page.evaluate(() => window.__pendingWriteTexts[0].reject(new Error('old metadata reject')));
+  await page.waitForTimeout(40);
+  assert.equal(await page.locator('#output-status').textContent(), '已复制 Markdown');
+  assert.equal(await page.locator('#output-error').textContent(), '');
 });
