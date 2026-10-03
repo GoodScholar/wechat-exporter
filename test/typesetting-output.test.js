@@ -928,6 +928,10 @@ test('plain text 将块容器中行内语义兄弟间的换行空白保留为单
 test('plain text 去除可见结构文本的换行缩进并保留内部与 inline 空格', async () => {
   const { buildTypesettingOutput } = await loadOutputModule();
   const indentationCases = [
+    ['<p>\n  段落\n</p>', '段落'],
+    ['<h1>\n  一级标题\n</h1>', '一级标题'],
+    ['<h2>\n  二级标题\n</h2>', '二级标题'],
+    ['<address>\n  地址\n</address>', '地址'],
     ['<blockquote>\n  引用\n</blockquote>', '引用'],
     ['<dl><dt>\n  术语\n</dt></dl>', '术语'],
     ['<dl><dd>\n  解释\n</dd></dl>', '解释'],

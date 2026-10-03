@@ -33,8 +33,7 @@ const blockPlainTextTags = new Set([
   'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'p'
 ]);
 const structuralWhitespaceParents = new Set([
-  'article', 'aside', 'blockquote', 'body', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'header', 'hgroup',
-  'main', 'nav', 'section', 'table', 'tbody', 'tfoot', 'thead', 'tr'
+  ...blockPlainTextTags, 'body', 'table', 'tbody', 'tfoot', 'thead', 'tr'
 ]);
 const inlinePlainTextTags = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt',
