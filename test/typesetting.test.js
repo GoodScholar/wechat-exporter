@@ -121,7 +121,7 @@ test('三套主题样式全部作用域化且不加载外部资源', async () =>
   assert.doesNotMatch(css, /(^|,|})\s*(?:h[1-6]|p|blockquote|ul|ol|li|pre|code|img|a|hr|table|th|td)\b/m);
 });
 
-test('第三方说明记录三套主题、设置来源、固定提交和许可证', async () => {
+test('第三方说明记录主题与 doocs 脚注最小移植来源许可和偏离', async () => {
   const notices = await readFile(new URL('../THIRD_PARTY_NOTICES.md', import.meta.url), 'utf8');
   for (const source of [
     'packages/shared/src/configs/theme-css/default.css',
@@ -129,10 +129,18 @@ test('第三方说明记录三套主题、设置来源、固定提交和许可�
     'packages/shared/src/configs/theme-css/simple.css',
     'packages/shared/src/configs/style.ts',
     'apps/web/src/stores/theme.ts',
+    'packages/core/src/renderer/renderer-impl.ts',
+    'addFootnote()',
+    'buildFootnoteArray()',
+    'buildFootnotes()',
+    'renderer.link()',
+    'src/typesetting-render.js',
     'a7c17fc4cda92e3c13aa7e24f06615cfa4219b31',
     'WTFPL v2'
   ]) assert.match(notices, new RegExp(source.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')));
   assert.match(notices, /主色|字号|行距|段间距/);
+  assert.match(notices, /URL parser|bare URL|sanitize-html/);
+  assert.doesNotMatch(notices, /No upstream source file is copied or vendored/);
 });
 
 test('浏览器原生撤销快捷键按宿主平台映射', () => {
