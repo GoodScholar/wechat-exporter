@@ -9,6 +9,7 @@ import { exportArticle, fetchResource } from './exporter.js';
 import { createVerificationBrowser } from './browser.js';
 import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
+import { buildTypesettingOutput } from './typesetting-output.js';
 import { renderTypesettingMarkdown } from './typesetting-render.js';
 import { TypesettingStore } from './typesetting.js';
 import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
@@ -21,6 +22,17 @@ const typesettingHtmlPath = realpathSync.native(path.join(publicDir, 'typesettin
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const typesettingContentSecurityPolicy = contentSecurityPolicy.replace("img-src 'self' data:", "img-src 'self' https:");
+const typesettingOutputPath = '/api/typesetting/output';
+const typesettingOutputRoute = /^\/api\/typesetting\/output$/u;
+const typesettingOutputErrors = Object.freeze({
+  OUTPUT_REQUEST_FORBIDDEN: Object.freeze({ status: 403, message: '排版输出请求被拒绝', retryable: false }),
+  OUTPUT_METHOD_NOT_ALLOWED: Object.freeze({ status: 405, message: '排版输出仅支持 POST 请求', retryable: false }),
+  OUTPUT_JSON_INVALID: Object.freeze({ status: 400, message: '排版输出 JSON 无效', retryable: false }),
+  OUTPUT_REQUEST_TOO_LARGE: Object.freeze({ status: 413, message: '排版输出请求过大', retryable: false }),
+  OUTPUT_REQUEST_INVALID: Object.freeze({ status: 400, message: '排版输出请求无效', retryable: false }),
+  OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false }),
+  OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true })
+});
 const typesettingRenderKeys = Object.freeze(['body', 'theme', 'settings', 'convertExternalLinksToFootnotes']);
 const hasExactKeys = (value, keys) => typeof value === 'object' && value !== null && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
@@ -57,7 +69,14 @@ function openWithSystem(directory) {
   });
 }
 
-export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle, typesettingRenderer = renderTypesettingMarkdown } = {}) {
+function sendTypesettingOutputError(res, code) {
+  const definition = typesettingOutputErrors[code];
+  return res.status(definition.status).json({
+    error: { code, message: definition.message, retryable: definition.retryable }
+  });
+}
+
+export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle, typesettingRenderer = renderTypesettingMarkdown, typesettingOutputBuilder = buildTypesettingOutput } = {}) {
   const app = express();
   const verification = createVerificationBrowser(dataDir);
   const getArticleHtml = async (articleUrl, { signal } = {}) => await verification.read(articleUrl) || (await fetchResource(articleUrl, 'article', { signal })).bytes.toString('utf8');
@@ -73,8 +92,15 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.locals.typesetting = typesetting;
   app.disable('x-powered-by');
   app.use((req, res, next) => {
-    if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '仅允许本机访问' });
-    if (req.method !== 'GET' && (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` || !req.is('application/json'))) return res.status(403).json({ error: '请求来源或格式不正确' });
+    if (req.path === typesettingOutputPath) {
+      if (req.method !== 'POST') return sendTypesettingOutputError(res, 'OUTPUT_METHOD_NOT_ALLOWED');
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)
+        || req.headers.origin && req.headers.origin !== `http://${req.headers.host}`
+        || !req.is('application/json')) return sendTypesettingOutputError(res, 'OUTPUT_REQUEST_FORBIDDEN');
+    } else {
+      if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)) return res.status(403).json({ error: '仅允许本机访问' });
+      if (req.method !== 'GET' && (req.headers.origin && req.headers.origin !== `http://${req.headers.host}` || !req.is('application/json'))) return res.status(403).json({ error: '请求来源或格式不正确' });
+    }
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': contentSecurityPolicy });
     next();
   });
@@ -107,6 +133,8 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     const rendered = typesettingRenderer(normalizeTypesettingRenderRequest(req.body));
     res.json({ html: rendered.html, presentation: rendered.presentation, diagnostics: rendered.diagnostics, blocked: rendered.blocked });
   });
+  app.post(typesettingOutputRoute, async (req, res) => res.json(await typesettingOutputBuilder(req.body)));
+  app.all(typesettingOutputRoute, (req, res) => sendTypesettingOutputError(res, 'OUTPUT_METHOD_NOT_ALLOWED'));
   app.get('/api/settings', (req, res) => res.json({ outputDirectory: store.getOutputDirectory() }));
   app.post('/api/settings', (req, res) => res.json({ outputDirectory: store.setOutputDirectory(req.body.outputDirectory) }));
   app.post('/api/open-directory', async (req, res) => {
@@ -165,6 +193,14 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   }));
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
+    if (req.path === typesettingOutputPath) {
+      if (error?.type === 'entity.too.large') return sendTypesettingOutputError(res, 'OUTPUT_REQUEST_TOO_LARGE');
+      if (error?.type === 'entity.parse.failed') return sendTypesettingOutputError(res, 'OUTPUT_JSON_INVALID');
+      if (error?.code === 'OUTPUT_REQUEST_INVALID' || error?.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID' || error?.code === 'OUTPUT_GENERATION_FAILED') {
+        return sendTypesettingOutputError(res, error.code);
+      }
+      return sendTypesettingOutputError(res, 'OUTPUT_GENERATION_FAILED');
+    }
     if (req.path === '/api/typesetting/rich-text' && error.type === 'entity.too.large') {
       const typed = new RichTextError(richTextErrorCodes.RICH_TEXT_TOO_LARGE);
       return res.status(typed.status).json({ error: typed.toJSON() });

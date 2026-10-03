@@ -1,8 +1,12 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile } from 'node:fs/promises';
+import { mkdtemp, readFile, rm } from 'node:fs/promises';
+import { request as httpRequest } from 'node:http';
+import os from 'node:os';
+import path from 'node:path';
 import { load } from 'cheerio';
 import juice from 'juice';
+import { createApp } from '../src/server.js';
 
 const readJson = async relativePath => JSON.parse(await readFile(new URL(relativePath, import.meta.url), 'utf8'));
 
@@ -107,6 +111,62 @@ function withCustomArrayPrototype(values) {
   const copy = [...values];
   Object.setPrototypeOf(copy, Object.create(Array.prototype));
   return copy;
+}
+
+async function serve(app) {
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  return {
+    base: `http://127.0.0.1:${server.address().port}`,
+    close: () => new Promise(resolve => server.close(resolve))
+  };
+}
+
+const outputHttpErrors = Object.freeze({
+  OUTPUT_REQUEST_FORBIDDEN: Object.freeze({ status: 403, message: '排版输出请求被拒绝', retryable: false }),
+  OUTPUT_METHOD_NOT_ALLOWED: Object.freeze({ status: 405, message: '排版输出仅支持 POST 请求', retryable: false }),
+  OUTPUT_JSON_INVALID: Object.freeze({ status: 400, message: '排版输出 JSON 无效', retryable: false }),
+  OUTPUT_REQUEST_TOO_LARGE: Object.freeze({ status: 413, message: '排版输出请求过大', retryable: false }),
+  OUTPUT_REQUEST_INVALID: Object.freeze({ status: 400, message: '排版输出请求无效', retryable: false }),
+  OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false }),
+  OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true })
+});
+
+async function assertTypedOutputResponse(response, code) {
+  const expected = outputHttpErrors[code];
+  assert.equal(response.status, expected.status);
+  assert.match(response.headers.get('content-type') || '', /^application\/json\b/iu);
+  const body = await response.json();
+  assert.deepEqual(Object.keys(body), ['error']);
+  assert.deepEqual(Object.keys(body.error), ['code', 'message', 'retryable']);
+  assert.deepEqual(body, { error: { code, message: expected.message, retryable: expected.retryable } });
+  assert.doesNotMatch(JSON.stringify(body), /sentinel|\/Users\/private|secret\.example|SyntaxError|entity\.parse|api\/typesetting\/output/iu);
+}
+
+function rawHttpResponse(url, { method, headers, body }) {
+  return new Promise((resolve, reject) => {
+    const target = new URL(url);
+    const request = httpRequest({
+      hostname: target.hostname,
+      port: target.port,
+      path: target.pathname,
+      method,
+      headers
+    }, response => {
+      const chunks = [];
+      response.on('data', chunk => chunks.push(chunk));
+      response.on('end', () => {
+        const content = Buffer.concat(chunks).toString('utf8');
+        resolve({
+          status: response.statusCode,
+          headers: { get: name => response.headers[name.toLowerCase()] || null },
+          json: async () => JSON.parse(content)
+        });
+      });
+    });
+    request.once('error', reject);
+    request.end(body);
+  });
 }
 
 test('输出依赖和共享 Markdown fixture 固定版本与完整 artifact shape', async () => {
@@ -1006,4 +1066,130 @@ test('完整 HTML 有固定安全文档壳四项元信息和同一 canonical 正
   assert.equal($('main a').attr('href'), '../article');
   assert.doesNotMatch(bundle.clipboard.html.content, /公众号 &|2026-10-03|<header/iu);
   assert.doesNotMatch(bundle.clipboard.plain.content, /公众号 &|2026-10-03|作者/iu);
+});
+
+test('output endpoint 只调用注入 builder 并原样返回 bundle 与 typed domain error', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-output-http-'));
+  const calls = [];
+  const bundle = {
+    schemaVersion: 1,
+    status: 'blocked',
+    snapshot: outputRequest(),
+    markdown: { mimeType: 'text/markdown;charset=utf-8', filename: '输出标题.md', content: 'sentinel bundle content' },
+    clipboard: null,
+    html: null
+  };
+  const typesettingOutputBuilder = async body => {
+    calls.push(body);
+    if (body.failure) {
+      const error = new Error(`internal sentinel /Users/private/${body.failure}`);
+      error.code = body.failure;
+      error.status = 418;
+      error.retryable = !outputHttpErrors[body.failure]?.retryable;
+      throw error;
+    }
+    if (body.unexpected) throw new Error('unexpected sentinel /Users/private/secret.example');
+    return bundle;
+  };
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'),
+    interval: 0,
+    typesettingOutputBuilder,
+    typesettingRenderer() {
+      throw new Error('output endpoint 不应调用 typesettingRenderer');
+    }
+  }));
+
+  try {
+    const successBody = outputRequest({ document: { ...document, body: '原样传递正文' } });
+    const success = await fetch(`${server.base}/api/typesetting/output`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(successBody)
+    });
+    assert.equal(success.status, 200);
+    assert.deepEqual(await success.json(), bundle);
+    assert.deepEqual(calls, [successBody]);
+
+    for (const code of ['OUTPUT_REQUEST_INVALID', 'OUTPUT_FAILED_IMAGE_TARGET_INVALID', 'OUTPUT_GENERATION_FAILED']) {
+      const response = await fetch(`${server.base}/api/typesetting/output`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ failure: code })
+      });
+      await assertTypedOutputResponse(response, code);
+    }
+    const unexpected = await fetch(`${server.base}/api/typesetting/output`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ unexpected: true })
+    });
+    await assertTypedOutputResponse(unexpected, 'OUTPUT_GENERATION_FAILED');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('transport typed error 覆盖 output guard method parser limit 并与其他 endpoint 隔离', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-output-transport-'));
+  let builderCalls = 0;
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'),
+    interval: 0,
+    typesettingOutputBuilder() {
+      builderCalls += 1;
+      throw new Error('transport 错误不应进入 builder sentinel');
+    }
+  }));
+  const endpoint = `${server.base}/api/typesetting/output`;
+
+  try {
+    await assertTypedOutputResponse(await rawHttpResponse(endpoint, {
+      method: 'POST',
+      headers: { Host: 'evil.example', 'Content-Type': 'application/json' },
+      body: '{}'
+    }), 'OUTPUT_REQUEST_FORBIDDEN');
+
+    const forbiddenRequests = [
+      { headers: { Origin: 'https://evil.example', 'Content-Type': 'application/json' }, body: '{}' },
+      { headers: { 'Content-Type': 'text/plain' }, body: 'sentinel /Users/private/not-json' }
+    ];
+    for (const init of forbiddenRequests) {
+      await assertTypedOutputResponse(await fetch(endpoint, { method: 'POST', ...init }), 'OUTPUT_REQUEST_FORBIDDEN');
+    }
+
+    for (const method of ['GET', 'PUT', 'DELETE']) {
+      const response = await fetch(endpoint, {
+        method,
+        headers: method === 'DELETE' ? { Host: 'evil.example' } : undefined
+      });
+      await assertTypedOutputResponse(response, 'OUTPUT_METHOD_NOT_ALLOWED');
+    }
+
+    await assertTypedOutputResponse(await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{"body":"sentinel /Users/private/source.md",'
+    }), 'OUTPUT_JSON_INVALID');
+
+    await assertTypedOutputResponse(await fetch(endpoint, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ body: `sentinel-${'x'.repeat(154 * 1024)}` })
+    }), 'OUTPUT_REQUEST_TOO_LARGE');
+
+    assert.equal(builderCalls, 0);
+
+    const existingEndpoint = await fetch(`${server.base}/api/typesetting/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    assert.equal(existingEndpoint.status, 400);
+    assert.deepEqual(await existingEndpoint.json(), { error: '排版预览请求无效' });
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
 });
