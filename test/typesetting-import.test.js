@@ -559,11 +559,17 @@ test('导入前保存失败只尝试一次，恢复编辑控件并保留文稿',
   } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
-test('仅排版页面允许 HTTPS 图片来源，文章导出页保持原有 CSP', async () => {
+test('仅排版页 CSP 允许 self 与 HTTPS 图片并拒绝 http data blob', async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-csp-'));
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
   try {
-    assert.doesNotMatch((await fetch(server.base + '/')).headers.get('content-security-policy'), /img-src 'self' data: https:/);
-    assert.match((await fetch(server.base + '/typesetting')).headers.get('content-security-policy'), /img-src 'self' data: https:/);
+    const exportResponse = await fetch(server.base + '/');
+    const typesettingResponse = await fetch(server.base + '/typesetting');
+    const imageSources = response => response.headers.get('content-security-policy').split(';')
+      .map(directive => directive.trim().split(/\s+/)).find(([name]) => name === 'img-src').slice(1);
+    assert.deepEqual(imageSources(exportResponse), ["'self'", 'data:']);
+    assert.deepEqual(imageSources(typesettingResponse), ["'self'", 'https:']);
+    assert.equal(typesettingResponse.headers.get('referrer-policy'), 'no-referrer');
+    assert.doesNotMatch(await typesettingResponse.text(), /<link rel="icon" href="data:/);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });

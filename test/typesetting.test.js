@@ -82,6 +82,7 @@ test('预览 API 拒绝顶层 customCss', async () => {
       body: representativeMarkdown,
       theme: 'default',
       settings: expectedThemeSettings.default,
+      convertExternalLinksToFootnotes: false,
       customCss: 'body{display:none}'
     });
     assert.equal(response.status, 400);
@@ -93,18 +94,18 @@ test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值'
   const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
   try {
     const settings = { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05', blockSpacing: '1.35' };
-    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings });
+    const accepted = await post(server.base, '/api/typesetting/render', { body: representativeMarkdown, theme: 'grace', settings, convertExternalLinksToFootnotes: false });
     assert.equal(accepted.status, 200);
     const payload = await accepted.json();
     assert.deepEqual(payload.presentation, { theme: 'grace', settings });
     assert.deepEqual(Object.keys(payload).sort(), ['blocked', 'diagnostics', 'html', 'presentation']);
 
     const invalidPresentations = [
-      { body: representativeMarkdown, theme: 'unknown', settings },
-      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' } },
-      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' } }
+      { body: representativeMarkdown, theme: 'unknown', settings, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { primaryColor: '#009874', fontSize: '18px', lineHeight: '2.05' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, unsafe: 'value' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, primaryColor: 'red; background:url(https://example.com/x)' }, convertExternalLinksToFootnotes: false },
+      { body: representativeMarkdown, theme: 'grace', settings: { ...settings, fontSize: '999px' }, convertExternalLinksToFootnotes: false }
     ];
     for (const body of invalidPresentations) assert.equal((await post(server.base, '/api/typesetting/render', body)).status, 400);
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
@@ -168,7 +169,8 @@ test('排版文稿经真实 HTTP 保存、渲染、重启和备份恢复，过�
     const preview = await (await post(server.base, '/api/typesetting/render', {
       body: unsafe,
       theme: 'default',
-      settings: expectedThemeSettings.default
+      settings: expectedThemeSettings.default,
+      convertExternalLinksToFootnotes: false
     })).json();
     assert.match(preview.html, /<h1/);
     assert.doesNotMatch(preview.html, /script|onerror|javascript:/i);
@@ -406,6 +408,41 @@ test('外链脚注开关写入任一提交阶段失败时旧值仍唯一可见',
       assert.equal((await new TypesettingStore(store.dataDir).load()).convertExternalLinksToFootnotes, false, phase);
     } finally { await rm(root, { recursive: true, force: true }); }
   }
+});
+
+test('工作台预览请求只采用完整水合文稿中的外链脚注布尔值', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-footnote-hydration-'));
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0 }));
+  const browser = await chromium.launch({ ...browserOptions(), headless: true });
+  const renderRequestFor = async document => {
+    const page = await browser.newPage();
+    let receiveRequest;
+    const requestReceived = new Promise(resolve => { receiveRequest = resolve; });
+    await page.route('**/api/typesetting/document', route => route.fulfill({
+      contentType: 'application/json',
+      body: JSON.stringify({ document })
+    }));
+    await page.route('**/api/typesetting/render', route => {
+      const request = route.request().postDataJSON();
+      receiveRequest(request);
+      return route.fulfill({
+        contentType: 'application/json',
+        body: JSON.stringify({ html: '<p>预览</p>', presentation: { theme: request.theme, settings: request.settings }, diagnostics: [], blocked: false })
+      });
+    });
+    await page.goto(server.base + '/typesetting');
+    const request = await requestReceived;
+    await page.close();
+    return request;
+  };
+  try {
+    const baseDocument = {
+      title: '', author: '', account: '', publishedAt: '', body: '正文', revision: 0, savedAt: '',
+      theme: 'default', themeSettings: expectedThemeSettings
+    };
+    assert.equal((await renderRequestFor({ ...baseDocument, convertExternalLinksToFootnotes: 'true' })).convertExternalLinksToFootnotes, false);
+    assert.equal((await renderRequestFor({ ...baseDocument, convertExternalLinksToFootnotes: true })).convertExternalLinksToFootnotes, true);
+  } finally { await browser.close(); await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('慢的旧预览响应不能覆盖较新的预览', async () => {

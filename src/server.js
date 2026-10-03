@@ -9,14 +9,42 @@ import { exportArticle, fetchResource } from './exporter.js';
 import { createVerificationBrowser } from './browser.js';
 import { fetchFeed } from './feeds.js';
 import { SavedFeeds } from './saved-feeds.js';
-import { TypesettingStore, renderTypesettingMarkdown } from './typesetting.js';
+import { renderTypesettingMarkdown } from './typesetting-render.js';
+import { TypesettingStore } from './typesetting.js';
+import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
 import { importTypesettingDocument, TypesettingImportError } from './typesetting-import.js';
 import { convertRichText, RichTextError, richTextErrorCodes } from './rich-text.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
-const typesettingContentSecurityPolicy = contentSecurityPolicy.replace("img-src 'self' data:", "img-src 'self' data: https:");
+const typesettingContentSecurityPolicy = contentSecurityPolicy.replace("img-src 'self' data:", "img-src 'self' https:");
+const typesettingRenderKeys = Object.freeze(['body', 'theme', 'settings', 'convertExternalLinksToFootnotes']);
+const hasExactKeys = (value, keys) => typeof value === 'object' && value !== null && !Array.isArray(value)
+  && Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
+
+function normalizeTypesettingRenderRequest(value) {
+  if (!hasExactKeys(value, typesettingRenderKeys)) {
+    const error = new Error('排版预览请求无效');
+    error.status = 400;
+    throw error;
+  }
+  if (typeof value.body !== 'string') {
+    const error = new Error('Markdown 正文必须是文本');
+    error.status = 400;
+    throw error;
+  }
+  if (typeof value.convertExternalLinksToFootnotes !== 'boolean') {
+    const error = new Error('外链转脚注设置无效');
+    error.status = 400;
+    throw error;
+  }
+  return {
+    body: value.body,
+    presentation: normalizeTypesettingPresentation({ theme: value.theme, settings: value.settings }),
+    convertExternalLinksToFootnotes: value.convertExternalLinksToFootnotes
+  };
+}
 
 function openWithSystem(directory) {
   const command = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer.exe' : 'xdg-open';
@@ -27,7 +55,7 @@ function openWithSystem(directory) {
   });
 }
 
-export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle } = {}) {
+export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle, typesettingRenderer = renderTypesettingMarkdown } = {}) {
   const app = express();
   const verification = createVerificationBrowser(dataDir);
   const getArticleHtml = async (articleUrl, { signal } = {}) => await verification.read(articleUrl) || (await fetchResource(articleUrl, 'article', { signal })).bytes.toString('utf8');
@@ -74,13 +102,8 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     }
   });
   app.post('/api/typesetting/render', (req, res) => {
-    if (typeof req.body !== 'object' || req.body === null || Array.isArray(req.body) || Object.keys(req.body).length !== 3 || !['body', 'theme', 'settings'].every(key => Object.prototype.hasOwnProperty.call(req.body, key))) throw new Error('排版预览请求无效');
-    if (typeof req.body?.body !== 'string') throw new Error('Markdown 正文必须是文本');
-    res.json(renderTypesettingMarkdown({
-      body: req.body.body,
-      presentation: { theme: req.body?.theme, settings: req.body?.settings },
-      convertExternalLinksToFootnotes: false
-    }));
+    const rendered = typesettingRenderer(normalizeTypesettingRenderRequest(req.body));
+    res.json({ html: rendered.html, presentation: rendered.presentation, diagnostics: rendered.diagnostics, blocked: rendered.blocked });
   });
   app.get('/api/settings', (req, res) => res.json({ outputDirectory: store.getOutputDirectory() }));
   app.post('/api/settings', (req, res) => res.json({ outputDirectory: store.setOutputDirectory(req.body.outputDirectory) }));

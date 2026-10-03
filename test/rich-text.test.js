@@ -260,7 +260,8 @@ test('富文本转换 HTTP API 只返回转换结果，错误使用稳定结构�
     const preview = await (await post(server.base, '/api/typesetting/render', {
       body: escaped.markdown,
       theme: 'default',
-      settings: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }
+      settings: { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' },
+      convertExternalLinksToFootnotes: false
     })).json();
     assert.doesNotMatch(preview.html, /<img\b/i);
     assert.match(preview.html, /&lt;img/);

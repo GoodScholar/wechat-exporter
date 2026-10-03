@@ -7,7 +7,7 @@ const importMessage = $('#import-message');
 const themeNames = [...themeControls.theme.options].map(option => option.value);
 const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
 const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
-let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings() };
+let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings(), convertExternalLinksToFootnotes: false };
 let saveTimer;
 let previewTimer;
 let saving = false;
@@ -32,7 +32,8 @@ function isCompleteThemeSettings(themeSettings) {
 function isCompleteDocument(document) {
   return typeof document === 'object' && document !== null && fields && Object.keys(fields).every(name => typeof document[name] === 'string')
     && Number.isSafeInteger(document.revision) && document.revision >= 0 && typeof document.savedAt === 'string'
-    && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings);
+    && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings)
+    && typeof document.convertExternalLinksToFootnotes === 'boolean';
 }
 function isValidPresentation(presentation) {
   return typeof presentation === 'object' && presentation !== null && isKnownOption(themeControls.theme, presentation.theme)
@@ -69,7 +70,7 @@ function showImportMessage(error) {
   }
 }
 async function preview(version) {
-  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() } }) });
+  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() }, convertExternalLinksToFootnotes: documentModel.convertExternalLinksToFootnotes }) });
   if (!response.ok) return;
   const rendered = await response.json();
   if (version === previewVersion && typeof rendered?.html === 'string' && isValidPresentation(rendered.presentation)) {

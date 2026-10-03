@@ -2,7 +2,11 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
+import { mkdtemp, readFile, readdir, rm } from 'node:fs/promises';
+import os from 'node:os';
+import path from 'node:path';
 import { convertRichText } from '../src/rich-text.js';
+import { createApp } from '../src/server.js';
 import { createTypesettingRenderer, renderTypesettingMarkdown } from '../src/typesetting-render.js';
 
 const presentation = {
@@ -11,6 +15,33 @@ const presentation = {
 };
 
 const input = (body, convertExternalLinksToFootnotes = false) => ({ body, presentation, convertExternalLinksToFootnotes });
+const httpInput = (overrides = {}) => ({
+  body: '# HTTP 渲染',
+  theme: presentation.theme,
+  settings: presentation.settings,
+  convertExternalLinksToFootnotes: false,
+  ...overrides
+});
+
+async function serve(app) {
+  const server = app.listen(0, '127.0.0.1');
+  await new Promise(resolve => server.once('listening', resolve));
+  return { base: `http://127.0.0.1:${server.address().port}`, close: () => new Promise(resolve => server.close(resolve)) };
+}
+
+async function post(base, route, body) {
+  return fetch(base + route, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+}
+
+async function snapshotDirectory(directory, prefix = '') {
+  const entries = [];
+  for (const item of await readdir(directory, { withFileTypes: true })) {
+    const name = path.join(prefix, item.name);
+    if (item.isDirectory()) entries.push(...await snapshotDirectory(path.join(directory, item.name), name));
+    else entries.push([name, await readFile(path.join(directory, item.name), 'utf8')]);
+  }
+  return entries;
+}
 
 function conversionDiagnostics(result, code) {
   return result.diagnostics.filter(item => item.code === code);
@@ -144,6 +175,97 @@ test('多次渲染不继承 diagnostic id target 或内部状态', () => {
     assert.equal(new Set(result.diagnostics.map(item => item.id)).size, result.diagnostics.length);
     assert.equal(result.blocked, result.diagnostics.some(item => item.severity === 'blocker'));
   }
+});
+
+test('渲染 HTTP 恰好接受四键并拒绝全部缺失额外和类型错误', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-http-'));
+  const calls = [];
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'),
+    interval: 0,
+    typesettingRenderer(value) {
+      calls.push(value);
+      return renderTypesettingMarkdown(value);
+    }
+  }));
+  try {
+    const accepted = await post(server.base, '/api/typesetting/render', httpInput({ convertExternalLinksToFootnotes: true }));
+    assert.equal(accepted.status, 200);
+    const payload = await accepted.json();
+    assert.deepEqual(Object.keys(payload).sort(), ['blocked', 'diagnostics', 'html', 'presentation']);
+    assert.deepEqual(calls, [input('# HTTP 渲染', true)]);
+
+    const valid = httpInput();
+    const invalid = [
+      ...Object.keys(valid).map(missing => Object.fromEntries(Object.entries(valid).filter(([key]) => key !== missing))),
+      { ...valid, extra: true },
+      { ...valid, body: 42 },
+      { ...valid, theme: 42 },
+      { ...valid, settings: null },
+      { ...valid, convertExternalLinksToFootnotes: 'false' },
+      { ...valid, theme: 'unknown' },
+      ...Object.keys(valid.settings).map(missing => ({
+        ...valid,
+        settings: Object.fromEntries(Object.entries(valid.settings).filter(([key]) => key !== missing))
+      })),
+      ...Object.entries({ primaryColor: '#FFFFFF', fontSize: '999px', lineHeight: '10', blockSpacing: '10' })
+        .map(([key, value]) => ({ ...valid, settings: { ...valid.settings, [key]: value } })),
+      { ...valid, settings: { ...valid.settings, unsafe: 'value' } }
+    ];
+    for (const body of invalid) {
+      const response = await post(server.base, '/api/typesetting/render', body);
+      assert.equal(response.status, 400, JSON.stringify(body));
+    }
+    assert.equal(calls.length, 1);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('渲染 HTTP 注入失败 renderer 返回安全 RENDER_FAILED 而非 400', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-failure-'));
+  const renderer = createTypesettingRenderer({
+    parseMarkdown() {
+      throw new Error('internal sentinel /Users/private/source.md');
+    }
+  });
+  const server = await serve(createApp({ dataDir: path.join(root, '.data'), interval: 0, typesettingRenderer: renderer }));
+  try {
+    const response = await post(server.base, '/api/typesetting/render', httpInput({ body: '失败正文' }));
+    assert.equal(response.status, 200);
+    const payload = await response.json();
+    assert.deepEqual(Object.keys(payload).sort(), ['blocked', 'diagnostics', 'html', 'presentation']);
+    assert.equal(payload.blocked, true);
+    assert.equal(payload.diagnostics.length, 1);
+    assert.equal(payload.diagnostics[0].code, 'RENDER_FAILED');
+    assert.equal(payload.diagnostics[0].severity, 'blocker');
+    assert.doesNotMatch(JSON.stringify(payload), /internal sentinel|\/Users\/private/);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
+});
+
+test('非法渲染请求不改变内存或磁盘文稿', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-render-immutable-'));
+  const dataDir = path.join(root, '.data');
+  const document = Object.freeze({ body: '内存文稿' });
+  let storeCalls = 0;
+  let rendererCalls = 0;
+  const typesettingStore = {
+    async load() { storeCalls++; return document; },
+    async save() { storeCalls++; return document; }
+  };
+  const server = await serve(createApp({
+    dataDir,
+    interval: 0,
+    typesettingStore,
+    typesettingRenderer() { rendererCalls++; throw new Error('非法请求不应调用 renderer'); }
+  }));
+  try {
+    const before = await snapshotDirectory(dataDir);
+    const response = await post(server.base, '/api/typesetting/render', httpInput({ extra: true }));
+    assert.equal(response.status, 400);
+    assert.equal(storeCalls, 0);
+    assert.equal(rendererCalls, 0);
+    assert.deepEqual(document, { body: '内存文稿' });
+    assert.deepEqual(await snapshotDirectory(dataDir), before);
+  } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
 test('外链脚注按规范化 URL 和首次出现去重聚合全部 targets', () => {
