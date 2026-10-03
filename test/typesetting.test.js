@@ -53,9 +53,10 @@ const answer = 42;
 | 单元格 A | 单元格 B |`;
 
 test('三套主题对代表性 Markdown 生成完全相同的语义 HTML', () => {
-  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown(representativeMarkdown, {
-    theme,
-    settings: expectedThemeSettings[theme]
+  const renders = typesettingThemeNames.map(theme => renderTypesettingMarkdown({
+    body: representativeMarkdown,
+    presentation: { theme, settings: expectedThemeSettings[theme] },
+    convertExternalLinksToFootnotes: false
   }));
   assert.ok(renders[0].html.includes('<h1>一级标题</h1>'));
   assert.ok(renders[0].html.includes('<table>'));
@@ -96,7 +97,7 @@ test('预览 API 只返回白名单 presentation 并原子拒绝非法主题值'
     assert.equal(accepted.status, 200);
     const payload = await accepted.json();
     assert.deepEqual(payload.presentation, { theme: 'grace', settings });
-    assert.deepEqual(Object.keys(payload).sort(), ['html', 'presentation']);
+    assert.deepEqual(Object.keys(payload).sort(), ['blocked', 'diagnostics', 'html', 'presentation']);
 
     const invalidPresentations = [
       { body: representativeMarkdown, theme: 'unknown', settings },

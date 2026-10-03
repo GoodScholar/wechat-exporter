@@ -1,8 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
-import sanitizeHtml from 'sanitize-html';
-import { marked } from 'marked';
 
 const fields = ['title', 'author', 'account', 'publishedAt', 'body'];
 const themeSettingKeys = Object.freeze(['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']);
@@ -159,14 +157,4 @@ export class TypesettingStore {
   }
 }
 
-export function renderTypesettingMarkdown(body, presentation) {
-  const normalizedPresentation = normalizeTypesettingPresentation(presentation);
-  if (!body.trim()) return { html: '', presentation: normalizedPresentation };
-  const html = sanitizeHtml(marked.parse(body, { gfm: true, breaks: true }), {
-    allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'h1', 'h2', 'span'],
-    allowedAttributes: { a: ['href', 'title'], img: ['src', 'alt', 'width', 'height'], th: ['colspan', 'rowspan'], td: ['colspan', 'rowspan'], code: ['class'] },
-    allowedSchemes: ['https', 'http', 'mailto'],
-    allowProtocolRelative: false
-  });
-  return { html, presentation: normalizedPresentation };
-}
+export { createTypesettingRenderer, renderTypesettingMarkdown } from './typesetting-render.js';
