@@ -242,6 +242,36 @@ test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async 
   assert.equal(requests[0].referer, undefined);
 });
 
+test('真实 renderer 的 HTTPS 404 占位保留安全 ALT 且仅生成非阻断 IMAGE_LOAD_FAILED', async t => {
+  const { page, base } = await withBrowser(t);
+  let imageRequests = 0;
+  await page.route('https://fixture.invalid/alt-fail.png', route => {
+    imageRequests++;
+    return route.fulfill({ status: 404, contentType: 'image/png', body: '' });
+  });
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('![  安全   ALT & \\<b\\>不注入\\</b\\>  ](https://fixture.invalid/alt-fail.png)');
+
+  const placeholder = page.locator('#preview .format-image-placeholder[data-image-state="load-failed"]');
+  await placeholder.waitFor();
+  assert.deepEqual(await placeholder.evaluate(node => ({
+    text: node.textContent,
+    containsElement: Boolean(node.querySelector('b')),
+    hasSource: node.hasAttribute('src'),
+    html: node.innerHTML
+  })), {
+    text: '图片加载失败。请检查图片地址后重试。 替代文本：安全 ALT & <b>不注入</b>',
+    containsElement: false,
+    hasSource: false,
+    html: '<figcaption>图片加载失败。请检查图片地址后重试。 替代文本：安全 ALT &amp; &lt;b&gt;不注入&lt;/b&gt;</figcaption>'
+  });
+  assert.equal((await placeholder.textContent()).includes('https://fixture.invalid/alt-fail.png'), false);
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '1');
+  assert.equal(await page.getByRole('button', { name: '图片加载失败，请检查图片地址后重试。' }).count(), 1);
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+  assert.equal(imageRequests, 1);
+});
+
 test('HTTPS 404 或中断在相同 target 原位变为可定位 load-failed advisory', async t => {
   const { page, base } = await withBrowser(t);
   await page.route('https://fixture.invalid/**', route => route.request().url().endsWith('/404.png')
@@ -264,7 +294,7 @@ test('HTTPS 404 或中断在相同 target 原位变为可定位 load-failed advi
       role: node.getAttribute('role'),
       tabindex: node.getAttribute('tabindex'),
       text: node.textContent
-    })), { target, state: 'load-failed', role: 'note', tabindex: '0', text: '图片加载失败。请检查图片地址后重试。' });
+    })), { target, state: 'load-failed', role: 'note', tabindex: '0', text: '图片加载失败。请检查图片地址后重试。 替代文本：远程示例' });
     assert.equal((await placeholder.innerHTML()).includes('https://fixture.invalid'), false);
     assert.deepEqual(await page.locator('[data-check-severity]').evaluateAll(groups => groups.map(group => group.querySelector('[data-check-count]').textContent)), ['1', '1', '1']);
     assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'true');

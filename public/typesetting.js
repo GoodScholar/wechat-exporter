@@ -248,6 +248,9 @@ function nextDynamicImageDiagnosticId(version) {
   while (used.has(id));
   return id;
 }
+function normalizeRuntimeImageAlt(value) {
+  return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
+}
 function settleImage(img, previewRoot, version, failed = false) {
   if (!isCurrentPendingImage(img, previewRoot, version)) {
     removePendingImageHandlers(img);
@@ -261,6 +264,7 @@ function settleImage(img, previewRoot, version, failed = false) {
   if (!failed && !img.complete) return;
 
   const target = img.getAttribute('data-format-target');
+  const alt = normalizeRuntimeImageAlt(img.alt);
   removePendingImageHandlers(img);
   const placeholder = document.createElement('figure');
   placeholder.className = 'format-image-placeholder';
@@ -269,7 +273,7 @@ function settleImage(img, previewRoot, version, failed = false) {
   placeholder.setAttribute('role', 'note');
   placeholder.tabIndex = 0;
   const caption = document.createElement('figcaption');
-  caption.textContent = '图片加载失败。请检查图片地址后重试。';
+  caption.textContent = `图片加载失败。请检查图片地址后重试。${alt ? ` 替代文本：${alt}` : ''}`;
   placeholder.append(caption);
   img.replaceWith(placeholder);
   dynamicImageDiagnostics.push({
