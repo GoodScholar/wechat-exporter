@@ -1,6 +1,6 @@
 import express from 'express';
 import JSZip from 'jszip';
-import { createReadStream } from 'node:fs';
+import { createReadStream, realpathSync } from 'node:fs';
 import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -16,6 +16,8 @@ import { importTypesettingDocument, TypesettingImportError } from './typesetting
 import { convertRichText, RichTextError, richTextErrorCodes } from './rich-text.js';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const publicDir = path.join(root, 'public');
+const typesettingHtmlPath = realpathSync.native(path.join(publicDir, 'typesetting.html'));
 const safeName = name => name.replace(/[<>:"/\\|?*\x00-\x1f]/g, '_').replace(/^\.+/, '').slice(0, 80) || '文章';
 const contentSecurityPolicy = "default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'self'";
 const typesettingContentSecurityPolicy = contentSecurityPolicy.replace("img-src 'self' data:", "img-src 'self' https:");
@@ -154,11 +156,11 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     res.on('close', () => stream.destroy());
     stream.pipe(res);
   });
-  app.get('/typesetting', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.sendFile('typesetting.html', { root: path.join(root, 'public') }); });
+  app.get('/typesetting', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.sendFile('typesetting.html', { root: publicDir }); });
   app.get('/typesetting.html', (req, res) => { res.set('Content-Security-Policy', typesettingContentSecurityPolicy); res.redirect(308, '/typesetting'); });
-  app.use(express.static(path.join(root, 'public'), {
+  app.use(express.static(publicDir, {
     setHeaders(res, filePath) {
-      if (filePath === path.join(root, 'public', 'typesetting.html')) res.set('Content-Security-Policy', typesettingContentSecurityPolicy);
+      if (realpathSync.native(filePath) === typesettingHtmlPath) res.set('Content-Security-Policy', typesettingContentSecurityPolicy);
     }
   }));
   app.use((error, req, res, next) => {
