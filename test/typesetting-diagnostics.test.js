@@ -15,6 +15,24 @@ function conversionDiagnostics(result, code) {
   return result.diagnostics.filter(item => item.code === code);
 }
 
+function imageDiagnostics(result) {
+  return result.diagnostics.filter(item => item.code.startsWith('IMAGE_'));
+}
+
+function assertStaticImageDiagnosticsAreStrictAndPresent(result) {
+  const diagnostics = imageDiagnostics(result);
+  assert.equal(result.blocked, false);
+  assert.equal(new Set(diagnostics.map(item => item.id)).size, diagnostics.length);
+  assert.equal(new Set(diagnostics.map(item => item.targets[0].id)).size, diagnostics.length);
+  for (const diagnostic of diagnostics) {
+    assert.deepEqual(Object.keys(diagnostic).sort(), ['code', 'id', 'message', 'severity', 'targets']);
+    assert.equal(diagnostic.severity, 'advisory');
+    assert.equal(diagnostic.targets.length, 1);
+    assertPreviewTargetsAreStrictAndPresent(result, diagnostic);
+    assert.equal(result.html.split(`data-format-target="${diagnostic.targets[0].id}"`).length - 1, 1);
+  }
+}
+
 function assertPreviewTargetsAreStrictAndPresent(result, diagnostic) {
   for (const target of diagnostic.targets) {
     assert.deepEqual(Object.keys(target).sort(), ['id', 'kind']);
@@ -312,6 +330,147 @@ test('脚注与特殊占位经过最终清理且多次 render 编号重置', () 
   assert.equal(conversionDiagnostics(first, 'SPECIAL_CONTENT_PLACEHOLDER').length, 1);
   assert.doesNotMatch(first.html, /<script|<b>|sentinel\(\)|\sonclick=|\sstyle=|data-evil|data-format-target="spoof"/i);
   assert.match(first.html, /href="https:\/\/media\.example\/video\?x=1&amp;y=2"/);
+});
+
+test('Markdown 与 raw HTML 图片使用相同的严格静态分类', () => {
+  const markdownImages = [
+    '![md-https](https://images.example/md.png)',
+    '![md-credential](https://reader:MD_SECRET@images.example/credential.png)',
+    '![md-http](http://images.example/http.png)',
+    '![md-protocol](//images.example/protocol.png)',
+    '![md-file](file:///Users/private/MD_FILE.png)',
+    '![md-unix](/Users/private/MD_UNIX.png)',
+    '![md-relative](../private/MD_RELATIVE.png)',
+    '![md-windows](<C:\\private\\MD_WINDOWS.png>)',
+    '![md-tilde](~/private/MD_TILDE.png)',
+    '![md-data](data:image/png;base64,MD_DATA_SECRET)',
+    '![md-blob](blob:https://images.example/MD_BLOB_SECRET)',
+    '![md-empty]()',
+    '![md-other](ftp://images.example/other.png)'
+  ];
+  const rawImages = [
+    '<img src="https://images.example/raw.png" alt="raw-https" data-format-target="format-target-spoof-1">',
+    '<img src="https://reader:RAW_SECRET@images.example/credential.png" alt="raw-credential" data-format-target="format-target-spoof-1">',
+    '<img src="http://images.example/http.png" alt="raw-http">',
+    '<img src="//images.example/protocol.png" alt="raw-protocol">',
+    '<img src="file:///Users/private/RAW_FILE.png" alt="raw-file">',
+    '<img src="/Users/private/RAW_UNIX.png" alt="raw-unix">',
+    '<img src="../private/RAW_RELATIVE.png" alt="raw-relative">',
+    '<img src="C:\\private\\RAW_WINDOWS.png" alt="raw-windows">',
+    '<img src="~/private/RAW_TILDE.png" alt="raw-tilde">',
+    '<img src="data:image/png;base64,RAW_DATA_SECRET" alt="raw-data">',
+    '<img src="blob:https://images.example/RAW_BLOB_SECRET" alt="raw-blob">',
+    '<img src="" alt="raw-empty">',
+    '<img alt="raw-missing">',
+    '<img src="ftp://images.example/other.png" alt="raw-other">'
+  ];
+  const result = renderTypesettingMarkdown(input([...markdownImages, ...rawImages].join('\n\n')));
+  const codes = imageDiagnostics(result).map(item => item.code);
+
+  assert.deepEqual(Object.fromEntries([...new Set(codes)].sort().map(code => [code, codes.filter(value => value === code).length])), {
+    IMAGE_LOCAL_BINARY: 4,
+    IMAGE_LOCAL_PATH: 10,
+    IMAGE_MISSING_SOURCE: 3,
+    IMAGE_UNSUPPORTED_SCHEME: 8
+  });
+  assert.equal(result.html.match(/<img\b/g)?.length, 2);
+  assert.equal(result.html.match(/<figure\b/g)?.length, 25);
+  const renderedTargets = [...result.html.matchAll(/data-format-target="([^"]+)"/g)].map(match => match[1]);
+  assert.equal(new Set(renderedTargets).size, renderedTargets.length);
+  assert.doesNotMatch(result.html, /format-target-spoof-1/);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
+});
+
+test('HTTPS 及微信 HTTPS 图片保留 pending no-referrer target 且无静态错误', () => {
+  const result = renderTypesettingMarkdown(input([
+    '![Markdown 普通](https://images.example/a.png)',
+    '![Markdown 微信](https://mmbiz.qpic.cn/mmbiz_png/a.png)',
+    '![Markdown HTTP 微信](http://mmbiz.qpic.cn/mmbiz_png/MD_HTTP.png)',
+    '<img src="https://images.example/raw.png" alt="Raw 普通" onerror="evil()" data-format-target="spoof">',
+    '<img src="https://mmbiz.qpic.cn/mmbiz_png/raw.png" alt="Raw 微信">',
+    '<img src="http://mmbiz.qpic.cn/mmbiz_png/RAW_HTTP.png" alt="Raw HTTP 微信">'
+  ].join('\n\n')));
+  const pending = [...result.html.matchAll(/<img\s+([^>]+)>/g)].map(match => match[1]);
+
+  assert.equal(pending.length, 4);
+  for (const attributes of pending) {
+    assert.match(attributes, /src="https:\/\//);
+    assert.match(attributes, /referrerpolicy="no-referrer"/);
+    assert.match(attributes, /data-image-state="pending"/);
+    assert.match(attributes, /data-format-target="format-target-[^"]+"/);
+    assert.doesNotMatch(attributes, /onerror|spoof/);
+  }
+  assert.deepEqual(imageDiagnostics(result).map(item => item.code), [
+    'IMAGE_UNSUPPORTED_SCHEME',
+    'IMAGE_UNSUPPORTED_SCHEME'
+  ]);
+  assert.doesNotMatch(result.html, /src="http:\/\//);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
+});
+
+test('不可发布图片原位占位可聚焦且不泄漏来源或发起请求', () => {
+  const result = renderTypesettingMarkdown(input([
+    '![本地路径](file:///Users/private/SECRET_FILE.png)',
+    '![本地二进制](data:image/png;base64,SECRET_BINARY)',
+    '![不支持协议](http://reader:SECRET_PASSWORD@images.example/SECRET_HTTP.png)',
+    '![缺失]()',
+    '<img src="../private/SECRET_RELATIVE.png" alt="Raw 本地路径">',
+    '<img src="blob:https://images.example/SECRET_BLOB" alt="Raw 本地二进制">',
+    '<img src="//images.example/SECRET_PROTOCOL.png" alt="Raw 不支持协议">',
+    '<img alt="Raw 缺失">'
+  ].join('\n\n')));
+
+  assert.equal(result.html.match(/<figure class="format-image-placeholder"/g)?.length, 8);
+  assert.equal(result.html.match(/role="note"/g)?.length, 8);
+  assert.equal(result.html.match(/tabindex="0"/g)?.length, 8);
+  assert.doesNotMatch(result.html, /<img\b|\ssrc=|\shref=/i);
+  assert.match(result.html, /本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。/);
+  assert.match(result.html, /本地图片不可发布。请先上传图片并替换为 HTTPS 地址。/);
+  assert.match(result.html, /图片协议不受支持。请替换为 HTTPS 地址。/);
+  assert.match(result.html, /图片缺少来源。请补充 HTTPS 地址。/);
+  assert.doesNotMatch(result.html + JSON.stringify(result.diagnostics), /SECRET_|\/Users\/private|reader|images\.example/);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
+});
+
+test('规范富文本图片占位刷新后重建唯一 advisory', () => {
+  const result = renderTypesettingMarkdown(input([
+    '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+    '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：安全\\*图片\\*',
+    '> [图片占位：unsupported-scheme] 图片协议不受支持。请替换为 HTTPS 地址。',
+    '> [图片占位：missing-source] 图片缺少来源。请补充 HTTPS 地址。',
+    '正文中的 [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 只是文字。',
+    '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。\n> 额外文本',
+    '> [图片占位：local-binary] 不完整文案',
+    '> > [图片占位：missing-source] 图片缺少来源。请补充 HTTPS 地址。'
+  ].join('\n\n')));
+
+  assert.deepEqual(imageDiagnostics(result).map(item => item.code), [
+    'IMAGE_LOCAL_BINARY',
+    'IMAGE_LOCAL_PATH',
+    'IMAGE_UNSUPPORTED_SCHEME',
+    'IMAGE_MISSING_SOURCE'
+  ]);
+  assert.equal(result.html.match(/format-image-placeholder/g)?.length, 4);
+  assert.match(result.html, /替代文本：安全\*图片\*/);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
+});
+
+test('图片 alt 折叠截断转义后仍不能突破 sanitizer', () => {
+  const longAlt = `${'🙂'.repeat(205)}   \n\t尾部`;
+  const result = renderTypesettingMarkdown(input([
+    `<img src="data:image/png;base64,ALT_SECRET" alt="${longAlt}">`,
+    '<img src="file:///private/ALT_PATH.png" alt="   \n\t  ">',
+    '<img src="http://images.example/ALT_HTTP.png" alt="&quot;&gt;&lt;script&gt;ALT_XSS&lt;/script&gt;&lt;img src=x onerror=evil()&gt;">',
+    '![Markdown \\*alt\\* \\[x\\] \\<tag\\>](blob:https://images.example/ALT_BLOB)'
+  ].join('\n\n')));
+
+  assert.equal((result.html.match(/🙂/g) || []).length, 200);
+  assert.doesNotMatch(result.html, /🙂{201}/u);
+  assert.equal(result.html.match(/替代文本：/g)?.length, 3);
+  assert.match(result.html, /&lt;script&gt;ALT_XSS&lt;\/script&gt;/);
+  assert.match(result.html, /替代文本：Markdown \*alt\* \[x\] &lt;tag&gt;/);
+  assert.doesNotMatch(result.html, /<(?:script|img)\b|<[^>]+\sonerror=|ALT_SECRET|ALT_PATH|ALT_HTTP|ALT_BLOB/i);
+  assertStaticImageDiagnosticsAreStrictAndPresent(result);
 });
 
 test('主题校验叶子模块支持两种导入顺序且 renderer 无反向依赖', () => {

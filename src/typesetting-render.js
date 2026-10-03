@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHmac, randomUUID } from 'node:crypto';
 import sanitizeHtml from 'sanitize-html';
 import { marked, Renderer } from 'marked';
 import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
@@ -11,22 +11,38 @@ const specialContentTypeByLabel = Object.freeze({
   '小程序卡片': 'mini-program',
   '投票': 'poll'
 });
+const imagePlaceholderMessages = Object.freeze({
+  'local-binary': '本地图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+  'local-path': '本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。',
+  'unsupported-scheme': '图片协议不受支持。请替换为 HTTPS 地址。',
+  'missing-source': '图片缺少来源。请补充 HTTPS 地址。'
+});
+const imageDiagnosticCodeByReason = Object.freeze({
+  'local-binary': 'IMAGE_LOCAL_BINARY',
+  'local-path': 'IMAGE_LOCAL_PATH',
+  'unsupported-scheme': 'IMAGE_UNSUPPORTED_SCHEME',
+  'missing-source': 'IMAGE_MISSING_SOURCE'
+});
+const targetSecret = randomUUID();
 const sanitizerBaseOptions = Object.freeze({
-  allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'h1', 'h2', 'span'],
+  allowedTags: [...sanitizeHtml.defaults.allowedTags, 'img', 'figure', 'h1', 'h2', 'span'],
   allowedAttributes: {
     a: ['href', 'title', 'data-format-target'],
     blockquote: ['class', 'data-format-target', 'tabindex', 'role'],
+    figure: ['class', 'data-format-target', 'tabindex', 'role'],
     p: ['class'],
-    img: ['src', 'alt', 'width', 'height'],
+    img: ['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target'],
     th: ['colspan', 'rowspan'],
     td: ['colspan', 'rowspan'],
     code: ['class']
   },
   allowedClasses: {
     blockquote: ['format-special-placeholder'],
+    figure: ['format-image-placeholder'],
     p: ['typeset-footnotes']
   },
   allowedSchemes: ['https', 'http', 'mailto'],
+  allowedSchemesByTag: { img: ['https'] },
   allowProtocolRelative: false
 });
 
@@ -55,6 +71,39 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, character => ({
     '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;'
   })[character]);
+}
+
+function normalizeImageAlt(value) {
+  return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
+}
+
+function classifyImageSource(value) {
+  const source = typeof value === 'string' ? value.trim() : '';
+  if (!source) return { reason: 'missing-source' };
+  if (/^(?:data|blob):/i.test(source)) return { reason: 'local-binary' };
+  if (/^file:/i.test(source) || /^(?:\/(?!\/)|[a-z]:[\\/]|\.{1,2}[\\/]|~[\\/]|\\)/i.test(source)) return { reason: 'local-path' };
+  if (/^\/\//.test(source)) return { reason: 'unsupported-scheme' };
+  try {
+    const url = new URL(source);
+    return url.protocol === 'https:' && !url.username && !url.password
+      ? { url: url.href }
+      : { reason: 'unsupported-scheme' };
+  } catch {
+    return { reason: 'local-path' };
+  }
+}
+
+function imagePlaceholderText(reason, alt) {
+  const message = imagePlaceholderMessages[reason];
+  return alt ? `${message} 替代文本：${alt}` : message;
+}
+
+function imageFactHtml(fact) {
+  if (fact.url) {
+    const alt = fact.alt ? ` alt="${escapeHtml(fact.alt)}"` : ' alt=""';
+    return `<img src="${escapeHtml(fact.url)}"${alt} referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${escapeHtml(fact.target.id)}">`;
+  }
+  return `<figure class="format-image-placeholder" data-format-target="${escapeHtml(fact.target.id)}" tabindex="0" role="note">${escapeHtml(imagePlaceholderText(fact.reason, fact.alt))}</figure>`;
 }
 
 function normalLinkHtml({ href, title, content, targetId, footnote }) {
@@ -105,6 +154,24 @@ function parseSpecialContent(token) {
   return { label, type: specialContentTypeByLabel[label], sourceUrl: url.href };
 }
 
+function parseCanonicalImagePlaceholder(token) {
+  if (token.tokens.length !== 1 || token.tokens[0].type !== 'paragraph') return null;
+  const inlineTokens = token.tokens[0].tokens;
+  if (!Array.isArray(inlineTokens) || inlineTokens.some(item => item.type !== 'text' && item.type !== 'escape')) return null;
+  const text = inlineTokens.map(item => item.text).join('');
+  if (text.includes('\n') || text.includes('\r')) return null;
+
+  for (const [reason, message] of Object.entries(imagePlaceholderMessages)) {
+    const fixed = `[图片占位：${reason}] ${message}`;
+    if (text === fixed) return { reason, alt: '' };
+    const prefix = `${fixed} 替代文本：`;
+    if (!text.startsWith(prefix)) continue;
+    const alt = text.slice(prefix.length);
+    if (alt && normalizeImageAlt(alt) === alt) return { reason, alt };
+  }
+  return null;
+}
+
 // Adapted from doocs/md@a7c17fc4cda92e3c13aa7e24f06615cfa4219b31
 // buildFootnoteArray()/buildFootnotes(); output is escaped and sanitized here.
 function buildFootnoteArray(footnotes) {
@@ -122,7 +189,7 @@ function buildFootnotes(footnotes) {
   return `<h4>参考链接</h4><p class="typeset-footnotes">${buildFootnoteArray(footnotes)}</p>`;
 }
 
-function createSanitizerOptions(targetKinds) {
+function createSanitizerOptions(targetKinds, createImageFact) {
   const keepControlledTarget = (tagName, attributes, kind) => {
     const targetId = attributes['data-format-target'];
     if (!targetId || targetKinds.get(targetId) !== kind) delete attributes['data-format-target'];
@@ -133,6 +200,42 @@ function createSanitizerOptions(targetKinds) {
     ...sanitizerBaseOptions,
     transformTags: {
       a: (tagName, attributes) => keepControlledTarget(tagName, attributes, 'link'),
+      img: (tagName, attributes) => {
+        const targetId = attributes['data-format-target'];
+        if (targetKinds.get(targetId) === 'image') {
+          const safe = {
+            src: attributes.src,
+            alt: attributes.alt || '',
+            referrerpolicy: 'no-referrer',
+            'data-image-state': 'pending',
+            'data-format-target': targetId
+          };
+          return { tagName, attribs: safe };
+        }
+        const fact = createImageFact(attributes.src, attributes.alt);
+        if (fact.url) {
+          return {
+            tagName,
+            attribs: {
+              src: fact.url,
+              alt: fact.alt,
+              referrerpolicy: 'no-referrer',
+              'data-image-state': 'pending',
+              'data-format-target': fact.target.id
+            }
+          };
+        }
+        return {
+          tagName: 'figure',
+          attribs: {
+            class: 'format-image-placeholder',
+            'data-format-target': fact.target.id,
+            tabindex: '0',
+            role: 'note'
+          },
+          text: imagePlaceholderText(fact.reason, fact.alt)
+        };
+      },
       blockquote: (tagName, attributes) => {
         const controlled = targetKinds.get(attributes['data-format-target']) === 'special';
         if (!controlled) {
@@ -142,6 +245,19 @@ function createSanitizerOptions(targetKinds) {
           delete attributes.role;
         }
         return { tagName, attribs: attributes };
+      },
+      figure: (tagName, attributes) => {
+        const controlled = targetKinds.get(attributes['data-format-target']) === 'image-placeholder';
+        if (!controlled) return { tagName, attribs: {} };
+        return {
+          tagName,
+          attribs: {
+            class: 'format-image-placeholder',
+            'data-format-target': attributes['data-format-target'],
+            tabindex: '0',
+            role: 'note'
+          }
+        };
       }
     }
   };
@@ -191,7 +307,7 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
       const footnotes = [];
       const footnoteByUrl = new Map();
       const targetKinds = new Map();
-      const targetNonce = randomUUID();
+      const targetNonce = createHmac('sha256', targetSecret).update(body).digest('hex').slice(0, 24);
       let nextTarget = 1;
       let blockquoteDepth = 0;
 
@@ -199,6 +315,21 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
         const id = `format-target-${targetNonce}-${nextTarget++}`;
         targetKinds.set(id, kind);
         return { kind: 'preview', id };
+      };
+
+      const createImageFact = (source, alt, knownReason) => {
+        const classification = knownReason ? { reason: knownReason } : classifyImageSource(source);
+        const target = createTarget(classification.url ? 'image' : 'image-placeholder');
+        const fact = { ...classification, alt: normalizeImageAlt(alt), target };
+        if (!classification.url) {
+          diagnostics.push(createDiagnostic({
+            code: imageDiagnosticCodeByReason[classification.reason],
+            severity: 'advisory',
+            message: imagePlaceholderMessages[classification.reason],
+            targets: [target]
+          }));
+        }
+        return fact;
       };
 
       // Adapted from doocs/md addFootnote(): first occurrence assigns the number,
@@ -242,6 +373,12 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
         const footnote = addFootnote(token.title || token.text || url.href, url.href, target);
         return decorateMarkedLink(rendered, target.id, footnote);
       };
+      renderer.image = function image(token) {
+        const alt = token.tokens
+          ? this.parser.parseInline(token.tokens, this.parser.textRenderer)
+          : token.text;
+        return imageFactHtml(createImageFact(token.href, alt));
+      };
       renderer.blockquote = function blockquote(token) {
         const special = blockquoteDepth === 0 ? parseSpecialContent(token) : null;
         if (special) {
@@ -258,6 +395,10 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
             : '';
           return `<blockquote class="format-special-placeholder" data-format-target="${target.id}" tabindex="0" role="note"><p>[特殊内容：${escapeHtml(special.label)}]${source}</p></blockquote>\n`;
         }
+        const imagePlaceholder = blockquoteDepth === 0 ? parseCanonicalImagePlaceholder(token) : null;
+        if (imagePlaceholder) {
+          return `${imageFactHtml(createImageFact(undefined, imagePlaceholder.alt, imagePlaceholder.reason))}\n`;
+        }
 
         blockquoteDepth += 1;
         try {
@@ -269,7 +410,7 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
 
       const parsed = parseMarkdown(body, { gfm: true, breaks: true, renderer });
       if (typeof parsed !== 'string') throw new TypeError('parseMarkdown 必须同步返回字符串');
-      const html = sanitizeHtml(parsed + buildFootnotes(footnotes), createSanitizerOptions(targetKinds));
+      const html = sanitizeHtml(parsed + buildFootnotes(footnotes), createSanitizerOptions(targetKinds, createImageFact));
       return toRenderResult({ html, presentation, diagnostics });
     } catch {
       return toRenderResult({
