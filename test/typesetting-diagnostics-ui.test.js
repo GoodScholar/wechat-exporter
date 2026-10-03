@@ -9,6 +9,7 @@ import { browserOptions } from '../src/browser.js';
 import { createDefaultThemeSettings } from '../src/typesetting.js';
 
 const settings = { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' };
+const onePixelPng = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII=', 'base64');
 
 async function serve(app) {
   const server = app.listen(0, '127.0.0.1');
@@ -44,6 +45,27 @@ function groupedResult(body) {
       { id: 'rich-removal', code: 'UNSAFE_RICH_TEXT_REMOVED', severity: 'conversion', message: '已移除不安全内容。', targets: [{ kind: 'source', start: 1, end: 3 }], meta: { types: ['script', 'unsafe-url'] } },
       { id: 'link-footnote', code: 'EXTERNAL_LINK_TO_FOOTNOTE', severity: 'conversion', message: '已转为脚注。', targets: [{ kind: 'preview', id: 'target&literal' }], meta: { footnote: 1, occurrences: 1 } },
       { id: 'missing-image', code: 'IMAGE_MISSING_SOURCE', severity: 'advisory', message: '图片缺少来源。', targets: [{ kind: 'preview', id: quotedTarget }] }
+    ],
+    blocked: true
+  };
+}
+
+function pendingImageResult(pathname, target = 'runtime-image-1', diagnostics = [], blocked = false) {
+  return {
+    html: `<img src="https://fixture.invalid${pathname}" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`,
+    presentation: { theme: 'default', settings },
+    diagnostics,
+    blocked
+  };
+}
+
+function threeSeverityImageResult(body, pathname, target) {
+  return {
+    html: `<figure role="note" tabindex="0" data-format-target="static-special"><figcaption>特殊内容占位</figcaption></figure><img src="https://fixture.invalid${pathname}" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`,
+    presentation: { theme: 'default', settings },
+    diagnostics: [
+      { id: 'static-blocker', code: 'RENDER_FAILED', severity: 'blocker', message: '渲染失败。', targets: [{ kind: 'source', start: 0, end: body.length }] },
+      { id: 'static-conversion', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '特殊内容已转为占位。', targets: [{ kind: 'preview', id: 'static-special' }], meta: { type: 'video' } }
     ],
     blocked: true
   };
@@ -198,6 +220,222 @@ test('畸形 RenderResult 的 HTTPS 图片在 strict 校验前不会发起请求
   assert.equal(sideEffectRequests, 0);
   assert.equal(await page.locator('#preview').innerHTML(), stable);
   assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'unknown');
+});
+
+test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async t => {
+  const { page, base } = await withBrowser(t);
+  const requests = [];
+  await page.route('https://fixture.invalid/**', route => {
+    requests.push(route.request().headers());
+    return route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng });
+  });
+  await installRenderFixture(page, request => request.body === '成功图片'
+    ? pendingImageResult('/ok.png')
+    : emptyResult(request.body));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('成功图片');
+
+  await page.locator('#preview img[data-image-state="loaded"]').waitFor();
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '0');
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0].referer, undefined);
+});
+
+test('HTTPS 404 或中断在相同 target 原位变为可定位 load-failed advisory', async t => {
+  const { page, base } = await withBrowser(t);
+  await page.route('https://fixture.invalid/**', route => route.request().url().endsWith('/404.png')
+    ? route.fulfill({ status: 404, contentType: 'image/png', body: '' })
+    : route.abort('failed'));
+  await installRenderFixture(page, request => request.body.startsWith('失败图片-')
+    ? threeSeverityImageResult(request.body, request.body.endsWith('404') ? '/404.png' : '/abort.png', `failed-${request.body}`)
+    : emptyResult(request.body));
+  await page.goto(base() + '/typesetting');
+  await page.evaluate(() => { Element.prototype.scrollIntoView = function () { this.dataset.scrolled = 'true'; }; });
+
+  for (const mode of ['404', 'abort']) {
+    const target = `failed-失败图片-${mode}`;
+    await page.getByLabel('Markdown 正文').fill(`失败图片-${mode}`);
+    const placeholder = page.locator(`#preview .format-image-placeholder[data-format-target="${target}"]`);
+    await placeholder.waitFor();
+    assert.deepEqual(await placeholder.evaluate(node => ({
+      target: node.getAttribute('data-format-target'),
+      state: node.getAttribute('data-image-state'),
+      role: node.getAttribute('role'),
+      tabindex: node.getAttribute('tabindex'),
+      text: node.textContent
+    })), { target, state: 'load-failed', role: 'note', tabindex: '0', text: '图片加载失败。请检查图片地址后重试。' });
+    assert.equal((await placeholder.innerHTML()).includes('https://fixture.invalid'), false);
+    assert.deepEqual(await page.locator('[data-check-severity]').evaluateAll(groups => groups.map(group => group.querySelector('[data-check-count]').textContent)), ['1', '1', '1']);
+    assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'true');
+    const ids = await page.locator('.format-check-item').evaluateAll(items => items.map(item => item.dataset.diagnosticId));
+    assert.equal(new Set(ids).size, ids.length);
+
+    const failureButton = page.getByRole('button', { name: '图片加载失败，请检查图片地址后重试。' });
+    await failureButton.focus();
+    await failureButton.press('Enter');
+    assert.deepEqual(await placeholder.evaluate(node => ({
+      active: document.activeElement === node,
+      scrolled: node.dataset.scrolled === 'true',
+      highlighted: node.classList.contains('format-target-highlight')
+    })), { active: true, scrolled: true, highlighted: true });
+  }
+});
+
+test('监听注册后立即处理 complete naturalWidth 避免缓存早发事件', async t => {
+  const { page, base } = await withBrowser(t);
+  await page.addInitScript(() => {
+    const complete = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'complete');
+    const naturalWidth = Object.getOwnPropertyDescriptor(HTMLImageElement.prototype, 'naturalWidth');
+    Object.defineProperty(HTMLImageElement.prototype, 'complete', {
+      configurable: true,
+      get() { return this.getAttribute('src')?.includes('/cached-') ? true : complete.get.call(this); }
+    });
+    Object.defineProperty(HTMLImageElement.prototype, 'naturalWidth', {
+      configurable: true,
+      get() {
+        if (this.getAttribute('src')?.includes('/cached-ok.png')) return 1;
+        if (this.getAttribute('src')?.includes('/cached-broken.png')) return 0;
+        return naturalWidth.get.call(this);
+      }
+    });
+    window.__imageListenerRegistrations = {};
+    const addEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      const pathname = this instanceof HTMLImageElement ? new URL(this.src).pathname : '';
+      if ((type === 'load' || type === 'error') && pathname.startsWith('/cached-')) {
+        const counts = window.__imageListenerRegistrations[pathname] ||= { load: 0, error: 0 };
+        counts[type]++;
+      }
+      return addEventListener.call(this, type, listener, options);
+    };
+  });
+  await page.route('https://fixture.invalid/**', route => route.fulfill({ status: 200, contentType: 'image/png', body: onePixelPng }));
+  await installRenderFixture(page, request => request.body === '缓存成功'
+    ? pendingImageResult('/cached-ok.png', 'cached-ok')
+    : request.body === '缓存失败'
+      ? pendingImageResult('/cached-broken.png', 'cached-broken')
+      : emptyResult(request.body));
+  await page.goto(base() + '/typesetting');
+
+  await page.getByLabel('Markdown 正文').fill('缓存成功');
+  await page.locator('#preview img[data-image-state="loaded"]').waitFor();
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '0');
+
+  await page.getByLabel('Markdown 正文').fill('缓存失败');
+  await page.locator('#preview .format-image-placeholder[data-image-state="load-failed"]').waitFor();
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '1');
+  assert.deepEqual(await page.evaluate(() => window.__imageListenerRegistrations), {
+    '/cached-ok.png': { load: 1, error: 1 },
+    '/cached-broken.png': { load: 1, error: 1 }
+  });
+});
+
+test('旧 preview 图片 load error 和过期响应不能污染新 HTML diagnostics blocked target', async t => {
+  const { page, base } = await withBrowser(t);
+  let releaseOldRender;
+  let oldRenderReached;
+  let releaseOldImage;
+  await page.addInitScript(() => {
+    const addEventListener = EventTarget.prototype.addEventListener;
+    EventTarget.prototype.addEventListener = function (type, listener, options) {
+      if (this instanceof HTMLImageElement && this.getAttribute('src')?.endsWith('/held.png') && type === 'error') window.__oldPreviewImage = this;
+      return addEventListener.call(this, type, listener, options);
+    };
+  });
+  await page.route('https://fixture.invalid/**', async route => {
+    if (!route.request().url().endsWith('/held.png')) return route.abort('blockedbyclient');
+    await new Promise(resolve => { releaseOldImage = resolve; });
+    await route.abort('failed');
+  });
+  await page.route('**/api/typesetting/render', async route => {
+    const request = route.request().postDataJSON();
+    if (request.body === '旧响应') {
+      oldRenderReached();
+      await new Promise(resolve => { releaseOldRender = resolve; });
+      return route.fulfill({ contentType: 'application/json', body: JSON.stringify(pendingImageResult('/late.png', 'late-target')) });
+    }
+    if (request.body === '旧图片') return route.fulfill({ contentType: 'application/json', body: JSON.stringify(pendingImageResult('/held.png', 'old-target')) });
+    if (request.body === '新响应') return route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+      html: '<figure class="format-image-placeholder" data-image-state="unsupported-scheme" data-format-target="new-target" role="note" tabindex="0"><figcaption>不支持的图片来源。</figcaption></figure>',
+      presentation: { theme: 'default', settings },
+      diagnostics: [{ id: 'new-static-image', code: 'IMAGE_UNSUPPORTED_SCHEME', severity: 'advisory', message: '图片协议不受支持。', targets: [{ kind: 'preview', id: 'new-target' }] }],
+      blocked: false
+    }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(emptyResult(request.body)) });
+  });
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('旧图片');
+  await page.locator('#preview img[data-image-state="pending"]').waitFor({ state: 'attached' });
+
+  const reached = new Promise(resolve => { oldRenderReached = resolve; });
+  await page.getByLabel('Markdown 正文').fill('旧响应');
+  await reached;
+  await page.evaluate(() => window.__oldPreviewImage.dispatchEvent(new Event('error')));
+  assert.equal(await page.locator('#preview img[data-format-target="old-target"][data-image-state="pending"]').count(), 1);
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '0');
+  await page.getByLabel('Markdown 正文').fill('新响应');
+  await waitForRenderState(page, 'current');
+  const current = await page.evaluate(() => ({
+    html: document.querySelector('#preview').innerHTML,
+    checks: document.querySelector('#format-checks').innerHTML,
+    blocked: document.querySelector('#render-status').dataset.blocked
+  }));
+
+  releaseOldRender();
+  await page.evaluate(() => window.__oldPreviewImage.dispatchEvent(new Event('error')));
+  releaseOldImage();
+  await page.waitForTimeout(120);
+  assert.deepEqual(await page.evaluate(() => ({
+    html: document.querySelector('#preview').innerHTML,
+    checks: document.querySelector('#format-checks').innerHTML,
+    blocked: document.querySelector('#render-status').dataset.blocked
+  })), current);
+  assert.equal(await page.locator('#preview [data-format-target="new-target"]').count(), 1);
+  assert.equal(await page.locator('.format-check-item[data-diagnostic-id="new-static-image"]').count(), 1);
+});
+
+test('静态不支持图片不发起网络请求且全部图片问题保持非阻断', async t => {
+  const { page, base } = await withBrowser(t);
+  const forbiddenRequests = [];
+  for (const pattern of ['http://unsafe.invalid/**', 'http://protocol-relative.invalid/**']) {
+    await page.route(pattern, route => { forbiddenRequests.push(route.request().url()); return route.abort('blockedbyclient'); });
+  }
+  await page.route('https://fixture.invalid/nonblocking-failure.png', route => route.fulfill({ status: 404, contentType: 'image/png', body: '' }));
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    if (request.body !== '静态与动态图片') return route.continue();
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({
+      html: '<figure class="format-image-placeholder" data-image-state="unsupported-scheme" data-format-target="static-unsupported" role="note" tabindex="0"><figcaption>图片协议不受支持。</figcaption></figure><img src="https://fixture.invalid/nonblocking-failure.png" alt="远程示例" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="dynamic-failure">',
+      presentation: { theme: 'default', settings },
+      diagnostics: [{ id: 'static-unsupported', code: 'IMAGE_UNSUPPORTED_SCHEME', severity: 'advisory', message: '图片协议不受支持。', targets: [{ kind: 'preview', id: 'static-unsupported' }] }],
+      blocked: false
+    }) });
+  });
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill([
+    '![http](http://unsafe.invalid/a.png)',
+    '![relative](//protocol-relative.invalid/a.png)',
+    '![file](file:///tmp/a.png)',
+    '![local](/tmp/a.png)',
+    '![dot](./a.png)',
+    '![data](data:image/png;base64,AAAA)',
+    '![blob](blob:https://fixture.invalid/id)',
+    '<img alt="missing">'
+  ].join('\n\n'));
+  await waitForRenderState(page, 'current');
+  await page.waitForTimeout(120);
+
+  assert.deepEqual(forbiddenRequests, []);
+  assert.equal(await page.locator('#preview img').count(), 0);
+  assert.equal(await page.locator('#preview .format-image-placeholder').count(), 8);
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '8');
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+
+  await page.getByLabel('Markdown 正文').fill('静态与动态图片');
+  await page.locator('#preview [data-format-target="dynamic-failure"][data-image-state="load-failed"]').waitFor();
+  assert.equal(await page.locator('[data-check-severity="advisory"] [data-check-count]').textContent(), '2');
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
 });
 
 test('document 启动读取失败仍以默认文稿发出四键 render 且无未捕获错误', async t => {

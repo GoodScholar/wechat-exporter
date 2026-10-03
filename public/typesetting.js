@@ -28,6 +28,9 @@ let appliedRenderVersion = 0;
 let renderFresh = false;
 let renderBlocked = false;
 let staticDiagnostics = [];
+let dynamicImageDiagnostics = [];
+let dynamicImageDiagnosticSequence = 0;
+const pendingImageHandlers = new WeakMap();
 let richPastePending = false;
 let richPasteVersion = 0;
 let activeRichPaste;
@@ -195,9 +198,10 @@ function focusDiagnostic(diagnostic, version) {
   setTimeout(() => node.classList.remove('format-target-highlight'), 1600);
 }
 function renderDiagnosticGroups(version) {
+  const allDiagnostics = [...staticDiagnostics, ...dynamicImageDiagnostics];
   for (const severity of severityNames) {
     const group = formatChecks.querySelector(`[data-check-severity="${severity}"]`);
-    const diagnostics = staticDiagnostics.filter(item => item.severity === severity);
+    const diagnostics = allDiagnostics.filter(item => item.severity === severity);
     group.querySelector('[data-check-count]').textContent = String(diagnostics.length);
     const list = group.querySelector('[data-check-list]');
     const fragment = document.createDocumentFragment();
@@ -220,18 +224,90 @@ function renderDiagnosticGroups(version) {
     list.replaceChildren(fragment);
   }
 }
+function removePendingImageHandlers(img) {
+  const handlers = pendingImageHandlers.get(img);
+  if (!handlers) return;
+  img.removeEventListener('load', handlers.load);
+  img.removeEventListener('error', handlers.error);
+  pendingImageHandlers.delete(img);
+}
+function isCurrentPendingImage(img, previewRoot, version) {
+  if (!renderFresh || version !== appliedRenderVersion || version !== previewVersion
+    || previewRoot !== $('#preview') || !previewRoot.contains(img)
+    || img.getAttribute('data-image-state') !== 'pending') return false;
+  const target = img.getAttribute('data-format-target');
+  if (!target) return false;
+  const matches = [...previewRoot.querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target);
+  return matches.length === 1 && matches[0] === img;
+}
+function nextDynamicImageDiagnosticId(version) {
+  const used = new Set([...staticDiagnostics, ...dynamicImageDiagnostics].map(item => item.id));
+  let id;
+  do id = `runtime-image-load-failed-${version}-${++dynamicImageDiagnosticSequence}`;
+  while (used.has(id));
+  return id;
+}
+function settleImage(img, previewRoot, version, failed = false) {
+  if (!isCurrentPendingImage(img, previewRoot, version)) {
+    removePendingImageHandlers(img);
+    return;
+  }
+  if (!failed && img.naturalWidth > 0) {
+    removePendingImageHandlers(img);
+    img.setAttribute('data-image-state', 'loaded');
+    return;
+  }
+  if (!failed && !img.complete) return;
+
+  const target = img.getAttribute('data-format-target');
+  removePendingImageHandlers(img);
+  const placeholder = document.createElement('figure');
+  placeholder.className = 'format-image-placeholder';
+  placeholder.setAttribute('data-image-state', 'load-failed');
+  placeholder.setAttribute('data-format-target', target);
+  placeholder.setAttribute('role', 'note');
+  placeholder.tabIndex = 0;
+  const caption = document.createElement('figcaption');
+  caption.textContent = '图片加载失败。请检查图片地址后重试。';
+  placeholder.append(caption);
+  img.replaceWith(placeholder);
+  dynamicImageDiagnostics.push({
+    id: nextDynamicImageDiagnosticId(version),
+    code: 'IMAGE_LOAD_FAILED',
+    severity: 'advisory',
+    message: '图片加载失败，请检查图片地址后重试。',
+    targets: [{ kind: 'preview', id: target }]
+  });
+  renderDiagnosticGroups(version);
+}
+function attachPendingImageHandlers(previewRoot, version) {
+  for (const img of previewRoot.querySelectorAll('img[data-image-state="pending"]')) {
+    if (pendingImageHandlers.has(img)) continue;
+    const handlers = {
+      load: () => settleImage(img, previewRoot, version),
+      error: () => settleImage(img, previewRoot, version, true)
+    };
+    pendingImageHandlers.set(img, handlers);
+    img.addEventListener('load', handlers.load);
+    img.addEventListener('error', handlers.error);
+    if (img.complete) settleImage(img, previewRoot, version, img.naturalWidth === 0);
+  }
+}
 function applyRenderResult(rendered, detachedPreview, version) {
   const currentPreview = $('#preview');
   const nextPreview = currentPreview.cloneNode(false);
   nextPreview.replaceChildren(...detachedPreview.childNodes);
   applyPresentation(nextPreview, rendered.presentation);
   staticDiagnostics = rendered.diagnostics;
+  dynamicImageDiagnostics = [];
   renderBlocked = rendered.blocked;
   appliedRenderVersion = version;
   renderFresh = true;
   currentPreview.replaceWith(nextPreview);
   renderDiagnosticGroups(version);
   syncRenderStatus('current');
+  attachPendingImageHandlers(nextPreview, version);
 }
 async function preview(version, snapshot) {
   try {

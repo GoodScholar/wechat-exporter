@@ -9,6 +9,10 @@
 }
 
 .typeset-preview img { display: block; max-width: 100%; height: auto; }
+.typeset-preview img[data-image-state="pending"] { opacity: .72; }
+.typeset-preview img[data-image-state="loaded"] { opacity: 1; }
+.typeset-preview .format-image-placeholder[data-image-state="load-failed"] { margin: 1em 0; padding: .9em 1em; border: 1px dashed var(--md-primary-color); border-radius: 4px; background: #f7f7f5; color: #5b625d; }
+.typeset-preview .format-image-placeholder[data-image-state="load-failed"] figcaption { margin: 0; }
 .typeset-preview pre { overflow: auto; }
 .typeset-preview table { width: 100%; border-collapse: collapse; }
 
