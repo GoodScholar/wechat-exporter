@@ -53,3 +53,10 @@
 .typeset-preview.typeset-theme-simple pre { margin: calc(1em * var(--md-block-spacing)) 0; padding: 12px; background: #f3f3f3; }
 .typeset-preview.typeset-theme-simple hr { margin: calc(1.6em * var(--md-block-spacing)) 0; border: 0; border-top: 1px solid #ddd; }
 .typeset-preview.typeset-theme-simple th, .typeset-preview.typeset-theme-simple td { padding: 6px; border: 1px solid #ddd; }
+
+.typeset-preview .format-target-highlight { outline: 3px solid var(--md-primary-color); outline-offset: 4px; }
+
+@media (prefers-reduced-motion: no-preference) {
+  .typeset-preview .format-target-highlight { animation: format-target-pulse .8s ease-in-out 2; }
+  @keyframes format-target-pulse { 50% { outline-offset: 8px; } }
+}

@@ -1,11 +1,19 @@
 const $ = selector => document.querySelector(selector);
 const fields = { title: $('#document-title'), author: $('#document-author'), account: $('#document-account'), publishedAt: $('#document-published-at'), body: $('#document-body') };
 const themeControls = { theme: $('#document-theme'), primaryColor: $('#theme-primary-color'), fontSize: $('#theme-font-size'), lineHeight: $('#theme-line-height'), blockSpacing: $('#theme-block-spacing'), reset: $('#reset-theme') };
+const convertExternalLinks = $('#convert-external-links');
 const importForm = $('#article-import');
 const importUrl = $('#import-url');
 const importMessage = $('#import-message');
+const renderStatus = $('#render-status');
+const formatChecks = $('#format-checks');
 const themeNames = [...themeControls.theme.options].map(option => option.value);
 const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
+const documentKeys = [...Object.keys(fields), 'revision', 'savedAt', 'theme', 'themeSettings', 'convertExternalLinksToFootnotes'];
+const severityNames = ['blocker', 'conversion', 'advisory'];
+const safeRemovedTypes = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
+const specialContentTypes = ['video', 'audio', 'embed', 'mini-program', 'poll'];
+const imageDiagnosticCodes = ['IMAGE_LOAD_FAILED', 'IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE'];
 const defaultThemeSettings = () => Object.fromEntries(['default', 'grace', 'simple'].map(theme => [theme, { primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' }]));
 let documentModel = { title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '', theme: 'default', themeSettings: defaultThemeSettings(), convertExternalLinksToFootnotes: false };
 let saveTimer;
@@ -16,12 +24,16 @@ let saveError;
 let dirty = false;
 let changeVersion = 0;
 let previewVersion = 0;
+let appliedRenderVersion = 0;
+let renderFresh = false;
+let renderBlocked = false;
+let staticDiagnostics = [];
 let richPastePending = false;
 let richPasteVersion = 0;
 let activeRichPaste;
 
 function setStatus(status, message = '') { $('#save-status').textContent = status; $('#save-status').className = status === '未保存' ? 'unsaved' : ''; $('#save-message').textContent = message; }
-function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; }
+function collect() { for (const [name, input] of Object.entries(fields)) documentModel[name] = input.value; documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked; }
 function currentThemeSettings() { return documentModel.themeSettings[documentModel.theme]; }
 function hasExactKeys(value, keys) { return typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => Object.hasOwn(value, key)); }
 function isKnownOption(control, value) { return [...control.options].some(option => option.value === value); }
@@ -30,15 +42,81 @@ function isCompleteThemeSettings(themeSettings) {
     && themeSettingNames.every(name => isKnownOption(themeControls[name], themeSettings[theme][name])));
 }
 function isCompleteDocument(document) {
-  return typeof document === 'object' && document !== null && fields && Object.keys(fields).every(name => typeof document[name] === 'string')
+  return hasExactKeys(document, documentKeys) && Object.keys(fields).every(name => typeof document[name] === 'string')
     && Number.isSafeInteger(document.revision) && document.revision >= 0 && typeof document.savedAt === 'string'
     && isKnownOption(themeControls.theme, document.theme) && isCompleteThemeSettings(document.themeSettings)
     && typeof document.convertExternalLinksToFootnotes === 'boolean';
 }
 function isValidPresentation(presentation) {
-  return typeof presentation === 'object' && presentation !== null && isKnownOption(themeControls.theme, presentation.theme)
+  return hasExactKeys(presentation, ['theme', 'settings']) && isKnownOption(themeControls.theme, presentation.theme)
     && hasExactKeys(presentation.settings, themeSettingNames)
     && themeSettingNames.every(name => isKnownOption(themeControls[name], presentation.settings[name]));
+}
+function isNonEmptyString(value) { return typeof value === 'string' && value.length > 0; }
+function isPositiveInteger(value) { return Number.isSafeInteger(value) && value > 0; }
+function isSourceTarget(target, body) {
+  return hasExactKeys(target, ['kind', 'start', 'end']) && target.kind === 'source'
+    && Number.isSafeInteger(target.start) && target.start >= 0
+    && Number.isSafeInteger(target.end) && target.start <= target.end && target.end <= body.length;
+}
+function isPreviewTarget(target, detachedPreview) {
+  if (!hasExactKeys(target, ['kind', 'id']) || target.kind !== 'preview' || !isNonEmptyString(target.id)) return false;
+  return [...detachedPreview.querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target.id).length === 1;
+}
+function hasValidTargets(diagnostic, body, detachedPreview, kind, count) {
+  if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
+  if (count !== undefined && diagnostic.targets.length !== count) return false;
+  return diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, detachedPreview));
+}
+function hasOrderedUniqueValues(values, allowed) {
+  return Array.isArray(values) && values.length > 0 && new Set(values).size === values.length
+    && values.every(value => allowed.includes(value))
+    && values.every((value, index) => index === 0 || allowed.indexOf(values[index - 1]) < allowed.indexOf(value));
+}
+function isValidDiagnostic(diagnostic, body, detachedPreview) {
+  if (typeof diagnostic !== 'object' || diagnostic === null || Array.isArray(diagnostic)
+    || !isNonEmptyString(diagnostic.id) || !isNonEmptyString(diagnostic.message)) return false;
+  const baseKeys = ['id', 'code', 'severity', 'message', 'targets'];
+  if (diagnostic.code === 'EMPTY_BODY') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && body.trim() === '' && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === 0;
+  }
+  if (diagnostic.code === 'RENDER_FAILED') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === body.length;
+  }
+  if (diagnostic.code === 'EXTERNAL_LINK_TO_FOOTNOTE') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview')
+      && hasExactKeys(diagnostic.meta, ['footnote', 'occurrences'])
+      && isPositiveInteger(diagnostic.meta.footnote) && diagnostic.meta.occurrences === diagnostic.targets.length;
+  }
+  if (diagnostic.code === 'SPECIAL_CONTENT_PLACEHOLDER') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview', 1)
+      && hasExactKeys(diagnostic.meta, ['type']) && specialContentTypes.includes(diagnostic.meta.type);
+  }
+  if (diagnostic.code === 'UNSAFE_RICH_TEXT_REMOVED') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'source', 1)
+      && hasExactKeys(diagnostic.meta, ['types']) && hasOrderedUniqueValues(diagnostic.meta.types, safeRemovedTypes);
+  }
+  if (imageDiagnosticCodes.includes(diagnostic.code)) {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'advisory'
+      && hasValidTargets(diagnostic, body, detachedPreview, 'preview', 1);
+  }
+  return false;
+}
+function isValidRenderResult(value, body, detachedPreview) {
+  if (!hasExactKeys(value, ['html', 'presentation', 'diagnostics', 'blocked'])
+    || typeof value.html !== 'string' || !isValidPresentation(value.presentation)
+    || !Array.isArray(value.diagnostics) || typeof value.blocked !== 'boolean') return false;
+  if (value.diagnostics.some(item => !isValidDiagnostic(item, body, detachedPreview))) return false;
+  if (new Set(value.diagnostics.map(item => item.id)).size !== value.diagnostics.length) return false;
+  return value.blocked === value.diagnostics.some(item => item.severity === 'blocker');
 }
 function syncThemeControls() {
   themeControls.theme.value = documentModel.theme;
@@ -69,24 +147,112 @@ function showImportMessage(error) {
     importMessage.append(link);
   }
 }
-async function preview(version) {
-  const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ body: documentModel.body, theme: documentModel.theme, settings: { ...currentThemeSettings() }, convertExternalLinksToFootnotes: documentModel.convertExternalLinksToFootnotes }) });
-  if (!response.ok) return;
-  const rendered = await response.json();
-  if (version === previewVersion && typeof rendered?.html === 'string' && isValidPresentation(rendered.presentation)) {
-    const preview = $('#preview');
-    const previous = { html: preview.innerHTML, className: preview.className, style: preview.getAttribute('style') };
-    try {
-      preview.innerHTML = rendered.html || '<p class="preview-empty">正文为空</p>';
-      applyPresentation(preview, rendered.presentation);
-    } catch {
-      preview.innerHTML = previous.html;
-      preview.className = previous.className;
-      if (previous.style === null) preview.removeAttribute('style'); else preview.setAttribute('style', previous.style);
+function renderSnapshot() {
+  return Object.freeze({
+    body: documentModel.body,
+    theme: documentModel.theme,
+    settings: Object.freeze({ ...currentThemeSettings() }),
+    convertExternalLinksToFootnotes: documentModel.convertExternalLinksToFootnotes
+  });
+}
+function sameRenderInput(left, right) {
+  return left.body === right.body && left.theme === right.theme
+    && left.convertExternalLinksToFootnotes === right.convertExternalLinksToFootnotes
+    && themeSettingNames.every(name => left.settings[name] === right.settings[name]);
+}
+function isCurrentRenderRequest(version, snapshot) { return version === previewVersion && sameRenderInput(snapshot, renderSnapshot()); }
+function syncRenderStatus(state) {
+  renderStatus.dataset.state = state;
+  renderStatus.dataset.blocked = renderFresh ? String(renderBlocked) : 'unknown';
+  renderStatus.textContent = state === 'checking' ? '正在重新检查'
+    : state === 'stale' ? '预览不是当前内容'
+      : renderBlocked ? '检查完成，存在阻断问题' : '检查完成';
+  formatChecks.setAttribute('aria-busy', state === 'checking' ? 'true' : 'false');
+  formatChecks.setAttribute('aria-disabled', renderFresh ? 'false' : 'true');
+}
+function markRenderChecking() { renderFresh = false; syncRenderStatus('checking'); }
+function markRenderStale() { renderFresh = false; syncRenderStatus('stale'); }
+function focusDiagnostic(diagnostic, version) {
+  if (!renderFresh || version !== appliedRenderVersion) return;
+  const target = diagnostic.targets[0];
+  if (target.kind === 'source') {
+    fields.body.focus();
+    fields.body.setSelectionRange(target.start, target.end);
+    return;
+  }
+  const matches = [...$('#preview').querySelectorAll('[data-format-target]')]
+    .filter(node => node.getAttribute('data-format-target') === target.id);
+  if (matches.length !== 1) return;
+  const node = matches[0];
+  $('#preview').querySelectorAll('.format-target-highlight').forEach(item => item.classList.remove('format-target-highlight'));
+  node.scrollIntoView({ block: 'center', behavior: 'auto' });
+  node.focus({ preventScroll: true });
+  node.classList.add('format-target-highlight');
+  setTimeout(() => node.classList.remove('format-target-highlight'), 1600);
+}
+function renderDiagnosticGroups(version) {
+  for (const severity of severityNames) {
+    const group = formatChecks.querySelector(`[data-check-severity="${severity}"]`);
+    const diagnostics = staticDiagnostics.filter(item => item.severity === severity);
+    group.querySelector('[data-check-count]').textContent = String(diagnostics.length);
+    const list = group.querySelector('[data-check-list]');
+    const fragment = document.createDocumentFragment();
+    if (diagnostics.length === 0) {
+      const empty = document.createElement('p');
+      empty.className = 'format-check-empty';
+      empty.textContent = '暂无';
+      fragment.append(empty);
+    } else {
+      for (const diagnostic of diagnostics) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.className = 'format-check-item';
+        button.dataset.diagnosticId = diagnostic.id;
+        button.textContent = diagnostic.message;
+        button.addEventListener('click', () => focusDiagnostic(diagnostic, version));
+        fragment.append(button);
+      }
     }
+    list.replaceChildren(fragment);
   }
 }
-function schedulePreview() { const version = ++previewVersion; clearTimeout(previewTimer); previewTimer = setTimeout(() => { void preview(version); }, 180); }
+function applyRenderResult(rendered, detachedPreview, version) {
+  const currentPreview = $('#preview');
+  const nextPreview = currentPreview.cloneNode(false);
+  nextPreview.replaceChildren(...detachedPreview.childNodes);
+  applyPresentation(nextPreview, rendered.presentation);
+  staticDiagnostics = rendered.diagnostics;
+  renderBlocked = rendered.blocked;
+  appliedRenderVersion = version;
+  renderFresh = true;
+  currentPreview.replaceWith(nextPreview);
+  renderDiagnosticGroups(version);
+  syncRenderStatus('current');
+}
+async function preview(version, snapshot) {
+  try {
+    const response = await fetch('/api/typesetting/render', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(snapshot) });
+    if (!response.ok) {
+      if (isCurrentRenderRequest(version, snapshot)) markRenderStale();
+      return;
+    }
+    const rendered = await response.json();
+    if (!isCurrentRenderRequest(version, snapshot)) return;
+    const detachedPreview = document.createElement('div');
+    detachedPreview.innerHTML = typeof rendered?.html === 'string' ? rendered.html : '';
+    if (!isValidRenderResult(rendered, snapshot.body, detachedPreview)) { markRenderStale(); return; }
+    applyRenderResult(rendered, detachedPreview, version);
+  } catch {
+    if (isCurrentRenderRequest(version, snapshot)) markRenderStale();
+  }
+}
+function schedulePreview() {
+  markRenderChecking();
+  const version = ++previewVersion;
+  const snapshot = renderSnapshot();
+  clearTimeout(previewTimer);
+  previewTimer = setTimeout(() => { void preview(version, snapshot); }, 180);
+}
 async function save() {
   clearTimeout(saveTimer); saveTimer = undefined;
   if (saving) return savingPromise;
@@ -124,6 +290,10 @@ async function flushSave() {
   return true;
 }
 for (const input of Object.values(fields)) input.addEventListener('input', () => { saveError = undefined; collect(); dirty = true; changeVersion++; schedulePreview(); scheduleSave(); });
+convertExternalLinks.addEventListener('change', () => {
+  documentModel.convertExternalLinksToFootnotes = convertExternalLinks.checked;
+  saveError = undefined; dirty = true; changeVersion++; schedulePreview(); scheduleSave();
+});
 themeControls.theme.addEventListener('change', () => {
   documentModel.theme = themeControls.theme.value;
   syncThemeControls();
@@ -206,6 +376,7 @@ importForm.addEventListener('submit', async event => {
   if (replacing && !window.confirm('当前文稿已有内容，导入将替换现有文稿。是否继续？')) return;
   const button = importForm.querySelector('button');
   button.disabled = true;
+  convertExternalLinks.disabled = true;
   for (const input of Object.values(fields)) input.disabled = true;
   for (const control of Object.values(themeControls)) control.disabled = true;
   try {
@@ -218,12 +389,22 @@ importForm.addEventListener('submit', async event => {
     dirty = false;
     if (!hydrateDocument(result.document)) throw { message: '服务返回了不完整的文稿。', action: '请重新载入页面后重试。' };
     for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
+    convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
     syncThemeControls();
     schedulePreview();
     setStatus('已保存');
     importMessage.textContent = '文章已导入，可继续编辑。';
   } catch (error) { showImportMessage(error); }
-  finally { button.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
+  finally { button.disabled = false; convertExternalLinks.disabled = false; for (const input of Object.values(fields)) input.disabled = false; for (const control of Object.values(themeControls)) control.disabled = false; }
 });
-async function start() { const response = await fetch('/api/typesetting/document'); if (response.ok) hydrateDocument((await response.json()).document); for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || ''; syncThemeControls(); void preview(++previewVersion); }
+async function start() {
+  const response = await fetch('/api/typesetting/document');
+  if (response.ok) hydrateDocument((await response.json()).document);
+  for (const [name, input] of Object.entries(fields)) input.value = documentModel[name] || '';
+  convertExternalLinks.checked = documentModel.convertExternalLinksToFootnotes;
+  syncThemeControls();
+  markRenderChecking();
+  const version = ++previewVersion;
+  void preview(version, renderSnapshot());
+}
 void start();
