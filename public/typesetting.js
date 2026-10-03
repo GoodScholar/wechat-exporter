@@ -7,6 +7,15 @@ const importUrl = $('#import-url');
 const importMessage = $('#import-message');
 const renderStatus = $('#render-status');
 const formatChecks = $('#format-checks');
+const outputControls = {
+  copyWechat: $('#copy-wechat'),
+  copyMarkdown: $('#copy-markdown'),
+  downloadHtml: $('#download-html'),
+  downloadMarkdown: $('#download-markdown'),
+  status: $('#output-status'),
+  error: $('#output-error')
+};
+const metadataFieldNames = Object.freeze({ title: '标题', author: '作者', account: '公众号名称', publishedAt: '发布日期' });
 const themeNames = [...themeControls.theme.options].map(option => option.value);
 const themeSettingNames = ['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing'];
 const documentKeys = [...Object.keys(fields), 'revision', 'savedAt', 'theme', 'themeSettings', 'convertExternalLinksToFootnotes'];
@@ -165,6 +174,7 @@ function invalidateOutput() {
   outputPending = false;
   outputBundle = undefined;
   outputCache = undefined;
+  syncOutputControls();
 }
 function isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot) {
   return requestVersion === outputRequestVersion && version === outputVersion
@@ -177,6 +187,7 @@ async function requestOutput() {
   outputPending = true;
   outputBundle = undefined;
   outputCache = undefined;
+  syncOutputControls();
   const requestVersion = ++outputRequestVersion;
   const version = outputVersion;
   const renderVersion = appliedRenderVersion;
@@ -188,19 +199,24 @@ async function requestOutput() {
       body: JSON.stringify(snapshot)
     });
     if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
-    if (!response.ok) { outputPending = false; return; }
+    if (!response.ok) { outputPending = false; syncOutputControls('failure'); return; }
     const bundle = await response.json();
     if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
     if (!isValidOutputBundle(bundle, snapshot) || (bundle.status === 'blocked') !== renderBlocked) {
       outputPending = false;
+      syncOutputControls('failure');
       return;
     }
     outputBundle = bundle;
     outputCache = { outputVersion: version, renderVersion, snapshot, bundle };
     outputFresh = true;
     outputPending = false;
+    syncOutputControls();
   } catch {
-    if (isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) outputPending = false;
+    if (isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) {
+      outputPending = false;
+      syncOutputControls('failure');
+    }
   }
 }
 function hasFreshOutput() {
@@ -224,6 +240,127 @@ function currentMarkdownArtifact() {
     content: buildNormalizedMarkdown(document)
   };
 }
+function clearOutputMessages() {
+  outputControls.status.textContent = '';
+  outputControls.error.textContent = '';
+}
+function syncOutputControls(state = '') {
+  const ready = hasFreshReadyOutput();
+  outputControls.copyWechat.disabled = !ready;
+  outputControls.downloadHtml.disabled = !ready;
+  outputControls.copyMarkdown.disabled = false;
+  outputControls.downloadMarkdown.disabled = false;
+  clearOutputMessages();
+  if (state === 'failure') {
+    outputControls.error.textContent = '未能生成富文本，仍可复制或下载 Markdown。';
+    return;
+  }
+  if (outputPending) {
+    outputControls.status.textContent = '正在准备输出';
+    return;
+  }
+  if (hasFreshOutput() && outputBundle.status === 'blocked') {
+    outputControls.status.textContent = '存在阻断问题，仍可复制或下载 Markdown';
+    return;
+  }
+  if (ready) outputControls.status.textContent = '输出已准备';
+}
+function showOutputSuccess(message) {
+  outputControls.status.textContent = message;
+  outputControls.error.textContent = '';
+}
+function showOutputFailure(message) {
+  outputControls.status.textContent = '';
+  outputControls.error.textContent = message;
+}
+async function copyWechatOutput() {
+  clearOutputMessages();
+  if (!hasFreshReadyOutput()) {
+    showOutputFailure('富文本输出尚未准备好，请复制或下载 Markdown。');
+    return;
+  }
+  const bundle = outputBundle;
+  try {
+    if (window.isSecureContext !== true || typeof navigator.clipboard?.write !== 'function'
+      || typeof window.ClipboardItem !== 'function') throw new Error('clipboard unsupported');
+    if (typeof window.ClipboardItem.supports === 'function'
+      && (!window.ClipboardItem.supports('text/html') || !window.ClipboardItem.supports('text/plain'))) throw new Error('clipboard MIME unsupported');
+    const item = new window.ClipboardItem({
+      'text/html': new Blob([bundle.clipboard.html.content], { type: bundle.clipboard.html.mimeType }),
+      'text/plain': new Blob([bundle.clipboard.plain.content], { type: bundle.clipboard.plain.mimeType })
+    });
+    await navigator.clipboard.write([item]);
+    showOutputSuccess('已复制正文富文本');
+  } catch {
+    showOutputFailure('未能复制富文本，请复制 Markdown 或下载 HTML');
+  }
+}
+async function copyMetadataField(name) {
+  clearOutputMessages();
+  const label = metadataFieldNames[name];
+  const value = fields[name].value;
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
+    await navigator.clipboard.writeText(value);
+    showOutputSuccess(`已复制${label}`);
+  } catch {
+    showOutputFailure(`未能复制${label}`);
+  }
+}
+async function copyMarkdownOutput() {
+  clearOutputMessages();
+  const artifact = currentMarkdownArtifact();
+  try {
+    if (typeof navigator.clipboard?.writeText !== 'function') throw new Error('clipboard unsupported');
+    await navigator.clipboard.writeText(artifact.content);
+    showOutputSuccess('已复制 Markdown');
+  } catch {
+    showOutputFailure('未能复制 Markdown，请下载 Markdown');
+  }
+}
+function downloadArtifact(artifact) {
+  const blob = new Blob([artifact.content], { type: artifact.mimeType });
+  const url = URL.createObjectURL(blob);
+  const anchor = document.createElement('a');
+  anchor.href = url;
+  anchor.download = artifact.filename;
+  document.body.append(anchor);
+  anchor.click();
+  setTimeout(() => {
+    URL.revokeObjectURL(url);
+    anchor.remove();
+  }, 0);
+}
+function downloadHtmlOutput() {
+  clearOutputMessages();
+  if (!hasFreshReadyOutput()) {
+    showOutputFailure('HTML 输出尚未准备好，请下载 Markdown。');
+    return;
+  }
+  try {
+    downloadArtifact(outputBundle.html);
+    showOutputSuccess('已下载 HTML');
+  } catch {
+    showOutputFailure('未能下载 HTML，请下载 Markdown。');
+  }
+}
+function downloadMarkdownOutput() {
+  clearOutputMessages();
+  try {
+    downloadArtifact(currentMarkdownArtifact());
+    showOutputSuccess('已下载 Markdown');
+  } catch {
+    showOutputFailure('未能下载 Markdown');
+  }
+}
+for (const button of document.querySelectorAll('[data-copy-field]')) {
+  button.addEventListener('click', () => { void copyMetadataField(button.dataset.copyField); });
+}
+outputControls.copyWechat.addEventListener('click', () => { void copyWechatOutput(); });
+outputControls.copyMarkdown.addEventListener('click', () => { void copyMarkdownOutput(); });
+outputControls.downloadHtml.addEventListener('click', downloadHtmlOutput);
+outputControls.downloadMarkdown.addEventListener('click', downloadMarkdownOutput);
+syncOutputControls();
 function isNonEmptyString(value) { return typeof value === 'string' && value.length > 0; }
 function isPositiveInteger(value) { return Number.isSafeInteger(value) && value > 0; }
 function isSourceTarget(target, body) {

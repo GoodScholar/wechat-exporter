@@ -123,6 +123,62 @@ async function currentMarkdownArtifact(page) {
   return page.evaluate(() => window.currentMarkdownArtifact());
 }
 
+function installOutputBrowserSpies() {
+  window.__secureContext = true;
+  Object.defineProperty(window, 'isSecureContext', {
+    configurable: true,
+    get: () => window.__secureContext
+  });
+  window.__clipboardMode = 'resolve';
+  window.__writeTextMode = 'resolve';
+  window.__clipboardSupports = { 'text/html': true, 'text/plain': true };
+  window.__clipboardItems = [];
+  window.__clipboardWrites = [];
+  window.__writeTextCalls = [];
+  window.__pendingClipboardWrites = [];
+  window.__execCommandCalls = 0;
+  document.execCommand = () => { window.__execCommandCalls++; return true; };
+  class TestClipboardItem {
+    static supports(type) { return window.__clipboardSupports[type] === true; }
+    constructor(types) {
+      this.types = types;
+      window.__clipboardItems.push(this);
+    }
+  }
+  window.ClipboardItem = TestClipboardItem;
+  Object.defineProperty(navigator, 'clipboard', {
+    configurable: true,
+    value: {
+      write(items) {
+        window.__clipboardWrites.push(items);
+        if (window.__clipboardMode === 'throw') throw new Error('write throw');
+        if (window.__clipboardMode === 'reject') return Promise.reject(new Error('write reject'));
+        if (window.__clipboardMode === 'pending') return new Promise((resolve, reject) => window.__pendingClipboardWrites.push({ resolve, reject }));
+        return Promise.resolve();
+      },
+      writeText(value) {
+        window.__writeTextCalls.push(value);
+        if (window.__writeTextMode === 'throw') throw new Error('writeText throw');
+        if (window.__writeTextMode === 'reject') return Promise.reject(new Error('writeText reject'));
+        return Promise.resolve();
+      }
+    }
+  });
+  window.__createdBlobs = [];
+  window.__downloadClicks = [];
+  window.__revokedUrls = [];
+  window.__openCalls = [];
+  window.open = (...args) => { window.__openCalls.push(args); };
+  URL.createObjectURL = blob => {
+    window.__createdBlobs.push(blob);
+    return `blob:output-test-${window.__createdBlobs.length}`;
+  };
+  URL.revokeObjectURL = url => { window.__revokedUrls.push(url); };
+  HTMLAnchorElement.prototype.click = function () {
+    window.__downloadClicks.push({ download: this.download, href: this.href, connected: this.isConnected, anchor: this });
+  };
+}
+
 test('客户端本地 Markdown artifact 与服务端共享 fixture 深度相等', async t => {
   const { page, base } = await withBrowser(t);
   await installRenderRoute(page);
@@ -478,4 +534,241 @@ test('图片 loaded 不失效而首次 error 按当前 DOM 顺序重建且重复
   await page.waitForTimeout(80);
   assert.equal(calls.length, afterNewRender, '旧 render 图片事件不得污染当前 failed set');
   assert.deepEqual(calls.at(-1).failedImageTargets, []);
+});
+
+test('输出区保留现有 label 并提供四个元信息复制按钮和四个输出动作', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await page.setViewportSize({ width: 720, height: 1000 });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await waitForRenderState(page, 'current');
+
+  for (const [field, copyName] of [
+    ['标题', '复制标题'],
+    ['作者', '复制作者'],
+    ['公众号名称', '复制公众号名称'],
+    ['发布日期', '复制发布日期']
+  ]) {
+    assert.equal(await page.getByLabel(field).count(), 1, `${field} label 仍须关联原输入`);
+    assert.equal(await page.getByRole('button', { name: copyName, exact: true }).count(), 1);
+  }
+  for (const name of ['复制到微信', '复制 Markdown', '下载 HTML', '下载 Markdown']) {
+    const button = page.getByRole('button', { name, exact: true });
+    assert.equal(await button.count(), 1);
+    assert.equal(await button.evaluate(node => getComputedStyle(node).height.replace('px', '') >= 42), true, `${name} 触控高度`);
+  }
+  assert.equal(await page.locator('#output-status[role="status"]').count(), 1);
+  assert.equal(await page.locator('#output-error[role="alert"]').count(), 1);
+  assert.equal(await page.evaluate(() => {
+    const editor = document.querySelector('.typesetting-editor');
+    const proof = document.querySelector('.typesetting-proof');
+    return Boolean(editor.compareDocumentPosition(proof) & Node.DOCUMENT_POSITION_FOLLOWING);
+  }), true, '窄屏不得改变编辑区与预览区的主体顺序');
+});
+
+test('HTML gate disabled pending blocker stale error 且 Markdown 下载始终可用', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const calls = [];
+  let mode = 'valid';
+  let releasePending;
+  await installRenderRoute(page);
+  await installOutputRoute(page, calls, async (route, request) => {
+    if (mode === 'pending') await new Promise(resolve => { releasePending = resolve; });
+    if (mode === 'failure') return route.fulfill({ status: 500, contentType: 'application/json', body: JSON.stringify({ error: { code: 'OUTPUT_GENERATION_FAILED', message: '排版输出生成失败', retryable: true } }) });
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request)) });
+  });
+  await page.goto(base + '/typesetting');
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent.includes('存在阻断问题'));
+  assert.equal(await page.locator('#copy-wechat').isDisabled(), true);
+  assert.equal(await page.locator('#download-html').isDisabled(), true);
+  assert.equal(await page.locator('#download-markdown').isEnabled(), true);
+  assert.equal(await page.locator('#output-error').textContent(), '');
+
+  mode = 'pending';
+  await page.getByLabel('Markdown 正文').fill('待准备');
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '正在准备输出');
+  assert.equal(await page.locator('#copy-wechat').isDisabled(), true);
+  assert.equal(await page.locator('#download-html').isDisabled(), true);
+  assert.equal(await page.locator('#download-markdown').isEnabled(), true);
+  mode = 'valid';
+  releasePending();
+  await waitForReadyOutput(page);
+  assert.equal(await page.locator('#copy-wechat').isEnabled(), true);
+  assert.equal(await page.locator('#download-html').isEnabled(), true);
+  assert.equal(await page.locator('#output-status').textContent(), '输出已准备');
+
+  mode = 'failure';
+  const beforeFailure = calls.length;
+  await page.getByLabel('Markdown 正文').fill('输出失败');
+  await waitForCount(calls, beforeFailure + 1);
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能生成富文本'));
+  assert.equal(await page.locator('#copy-wechat').isDisabled(), true);
+  assert.equal(await page.locator('#download-html').isDisabled(), true);
+  assert.equal(await page.locator('#download-markdown').isEnabled(), true);
+});
+
+test('富文本双 MIME 仅在 write resolve 后成功且失败无 fallback', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('双 MIME 正文');
+  await waitForReadyOutput(page);
+
+  await page.evaluate(() => { window.__clipboardMode = 'pending'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => window.__pendingClipboardWrites.length === 1);
+  assert.doesNotMatch(await page.locator('#output-status').textContent(), /已复制正文富文本/u);
+  const pendingShape = await page.evaluate(async () => ({
+    itemCount: window.__clipboardItems.length,
+    itemTypes: Object.keys(window.__clipboardItems[0].types).sort(),
+    html: await window.__clipboardItems[0].types['text/html'].text(),
+    plain: await window.__clipboardItems[0].types['text/plain'].text(),
+    writeCount: window.__clipboardWrites.length,
+    writeTextCount: window.__writeTextCalls.length,
+    execCount: window.__execCommandCalls
+  }));
+  assert.deepEqual(pendingShape, {
+    itemCount: 1,
+    itemTypes: ['text/html', 'text/plain'],
+    html: '<p>双 MIME 正文</p>',
+    plain: '双 MIME 正文',
+    writeCount: 1,
+    writeTextCount: 0,
+    execCount: 0
+  });
+  await page.evaluate(() => window.__pendingClipboardWrites[0].resolve());
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制正文富文本');
+
+  await page.evaluate(() => { window.__clipboardMode = 'reject'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
+  assert.equal(await page.locator('#download-html').isEnabled(), true, '剪贴板失败不得隐藏 HTML 下载');
+  assert.deepEqual(await page.evaluate(() => ({ writeTextCount: window.__writeTextCalls.length, execCount: window.__execCommandCalls })), { writeTextCount: 0, execCount: 0 });
+
+  const beforeUnsupported = await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length }));
+  await page.evaluate(() => { window.__clipboardSupports['text/plain'] = false; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
+  assert.deepEqual(await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length })), beforeUnsupported, '支持性检查必须早于 Blob/ClipboardItem/write');
+
+  await page.evaluate(() => { window.__clipboardSupports['text/plain'] = true; window.__clipboardMode = 'throw'; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
+  assert.deepEqual(await page.evaluate(() => ({
+    items: window.__clipboardItems.length,
+    writes: window.__clipboardWrites.length,
+    writeText: window.__writeTextCalls.length,
+    exec: window.__execCommandCalls
+  })), { items: beforeUnsupported.items + 1, writes: beforeUnsupported.writes + 1, writeText: 0, exec: 0 }, 'write 同步抛错也不得 fallback');
+
+  const beforeInsecure = await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length }));
+  await page.evaluate(() => { window.__secureContext = false; });
+  await page.locator('#copy-wechat').click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制富文本'));
+  assert.deepEqual(await page.evaluate(() => ({ items: window.__clipboardItems.length, writes: window.__clipboardWrites.length })), beforeInsecure, '非安全上下文不得构造 item 或写入');
+});
+
+test('元信息复制按点击时原值各调用一次 writeText', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  await installRenderRoute(page);
+  await installOutputRoute(page, []);
+  await page.goto(base + '/typesetting');
+  const cases = [
+    ['标题', '标题原值'],
+    ['作者', ' 作者 '],
+    ['公众号名称', '账号#1'],
+    ['发布日期', '']
+  ];
+  for (const [index, [field, value]] of cases.entries()) {
+    const input = page.getByLabel(field);
+    await input.fill(value);
+    await page.getByRole('button', { name: `复制${field}`, exact: true }).click();
+    await page.waitForFunction(expected => window.__writeTextCalls.length === expected, index + 1);
+  }
+  assert.deepEqual(await page.evaluate(() => window.__writeTextCalls), cases.map(([, value]) => value));
+  assert.equal(await page.locator('#output-status').textContent(), '已复制发布日期');
+
+  await page.evaluate(() => { window.__writeTextMode = 'reject'; });
+  await page.getByRole('button', { name: '复制标题', exact: true }).click();
+  await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.includes('未能复制标题'));
+  assert.notEqual(await page.locator('#output-status').textContent(), '已复制标题');
+  assert.equal(await page.evaluate(() => window.__execCommandCalls), 0);
+});
+
+test('Markdown 复制与 Blob 下载严格使用当前 artifact 且 HTML 重查 gate', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const outputCalls = [];
+  await installRenderRoute(page);
+  await installOutputRoute(page, outputCalls);
+  await page.goto(base + '/typesetting');
+  await page.waitForFunction(() => document.querySelector('#output-status')?.textContent.includes('存在阻断问题'));
+  const blockedBundle = outputBundle(outputCalls.at(-1));
+  await page.locator('#download-markdown').click();
+  await page.waitForFunction(() => window.__revokedUrls.length === 1);
+  assert.deepEqual(await page.evaluate(async () => ({
+    type: window.__createdBlobs[0].type,
+    content: await window.__createdBlobs[0].text(),
+    filename: window.__downloadClicks[0].download
+  })), {
+    type: blockedBundle.markdown.mimeType,
+    content: blockedBundle.markdown.content,
+    filename: blockedBundle.markdown.filename
+  }, 'fresh blocked bundle 仍必须直接下载服务端 Markdown artifact');
+  await page.evaluate(() => {
+    window.__createdBlobs = [];
+    window.__downloadClicks = [];
+    window.__revokedUrls = [];
+  });
+  await page.getByLabel('标题').fill('服务端标题');
+  await page.getByLabel('Markdown 正文').fill('可下载正文');
+  await waitForReadyOutput(page);
+  const readyBundle = outputBundle(outputCalls.at(-1));
+
+  await page.locator('#copy-markdown').click();
+  await page.waitForFunction(() => window.__writeTextCalls.length === 1);
+  assert.deepEqual(await page.evaluate(() => window.__writeTextCalls), [readyBundle.markdown.content]);
+  await page.locator('#download-html').click();
+  await page.locator('#download-markdown').click();
+  await page.waitForFunction(() => window.__revokedUrls.length === 2);
+  const readyDownloads = await page.evaluate(async () => Promise.all(window.__createdBlobs.map(async (blob, index) => ({
+    type: blob.type,
+    content: await blob.text(),
+    filename: window.__downloadClicks[index].download,
+    connectedAtClick: window.__downloadClicks[index].connected,
+    connectedAfterCleanup: window.__downloadClicks[index].anchor.isConnected
+  }))));
+  assert.deepEqual(readyDownloads, [
+    { type: readyBundle.html.mimeType, content: readyBundle.html.content, filename: readyBundle.html.filename, connectedAtClick: true, connectedAfterCleanup: false },
+    { type: readyBundle.markdown.mimeType, content: readyBundle.markdown.content, filename: readyBundle.markdown.filename, connectedAtClick: true, connectedAfterCleanup: false }
+  ]);
+
+  const beforeStale = await page.evaluate(() => ({ blobs: window.__createdBlobs.length, clicks: window.__downloadClicks.length }));
+  await page.evaluate(() => {
+    const title = document.querySelector('#document-title');
+    title.value = '本地/新标题';
+    title.dispatchEvent(new Event('input', { bubbles: true }));
+    document.querySelector('#download-html').dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    document.querySelector('#download-markdown').click();
+  });
+  await page.waitForFunction(count => window.__createdBlobs.length === count + 1, beforeStale.blobs);
+  await page.waitForFunction(count => window.__revokedUrls.length === count + 1, 2);
+  const staleDownload = await page.evaluate(async () => {
+    const index = window.__createdBlobs.length - 1;
+    return {
+      type: window.__createdBlobs[index].type,
+      content: await window.__createdBlobs[index].text(),
+      filename: window.__downloadClicks[index].download,
+      blobs: window.__createdBlobs.length,
+      clicks: window.__downloadClicks.length,
+      openCalls: window.__openCalls.length
+    };
+  });
+  assert.equal(staleDownload.type, 'text/markdown;charset=utf-8');
+  assert.equal(staleDownload.filename, '本地_新标题.md');
+  assert.match(staleDownload.content, /^---\ntitle: "本地\/新标题"/u);
+  assert.equal(staleDownload.blobs, beforeStale.blobs + 1, 'stale HTML 点击不得创建 Blob');
+  assert.equal(staleDownload.clicks, beforeStale.clicks + 1, 'stale HTML 点击不得创建 anchor');
+  assert.equal(staleDownload.openCalls, 0);
 });
