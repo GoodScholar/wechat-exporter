@@ -34,7 +34,7 @@ const blockPlainTextTags = new Set([
 ]);
 const listPlainTextTags = new Set(['menu', 'ol', 'ul']);
 const structuralWhitespaceParents = new Set([
-  ...blockPlainTextTags, 'body', 'table', 'tbody', 'tfoot', 'thead', 'tr'
+  ...blockPlainTextTags, 'body', 'caption', 'table', 'tbody', 'tfoot', 'thead', 'tr'
 ]);
 const inlinePlainTextTags = new Set([
   'a', 'abbr', 'b', 'bdi', 'bdo', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt',
@@ -592,7 +592,7 @@ function parseSingleSection(html, presentation, { clean = false } = {}) {
 // clipboard-dom.ts modifyHtmlStructure(); adapted to Cheerio and stable multi-list order.
 function modifyHtmlStructure($) {
   for (const item of $('li').toArray()) {
-    const childLists = $(item).children('ul, ol').toArray();
+    const childLists = $(item).children('menu, ol, ul').toArray();
     if (childLists.length > 0) $(item).after(childLists);
   }
 }
@@ -642,6 +642,10 @@ function isPlainTextBlockNode(node) {
   return blockPlainTextTags.has(tagName) || listPlainTextTags.has(tagName) || tagName === 'table' || tagName === 'pre';
 }
 
+function isPlainTextLineBoundaryNode(node) {
+  return isPlainTextBlockNode(node) || (node?.type === 'tag' && node.tagName.toLowerCase() === 'br');
+}
+
 function renderInlinePlainText($, nodes, depth) {
   let output = '';
   for (const node of nodes) {
@@ -661,7 +665,10 @@ function renderListPlainText($, list, depth) {
     if (child.type !== 'tag') continue;
     if (child.tagName === 'li') {
       const inlineNodes = $(child).contents().toArray().filter(node => node.type !== 'tag' || !listPlainTextTags.has(node.tagName));
-      const text = renderInlinePlainText($, inlineNodes, depth).replace(/\s+/gu, ' ').trim();
+      const text = renderInlinePlainText($, inlineNodes, depth)
+        .split('\n')
+        .map(line => line.replace(/\s+/gu, ' ').trim())
+        .join('\n');
       output += `${'  '.repeat(depth)}${ordered ? `${number}. ` : '- '}${text}\n`;
       number += 1;
       for (const nested of $(child).children('menu, ol, ul').toArray()) output += renderListPlainText($, nested, depth + 1);
@@ -718,8 +725,8 @@ function renderPlainTextNode($, node, depth = 0) {
       const trailingWhitespace = /[\s\u00a0]*$/u.exec(raw)?.[0] || '';
       const before = adjacentSemanticPlainNode(node, -1);
       const after = adjacentSemanticPlainNode(node, 1);
-      if (/[\r\n]/u.test(leadingWhitespace) && (!before || isPlainTextBlockNode(before))) value = value.replace(/^ /u, '');
-      if (/[\r\n]/u.test(trailingWhitespace) && (!after || isPlainTextBlockNode(after))) value = value.replace(/ $/u, '');
+      if (/[\r\n]/u.test(leadingWhitespace) && (!before || isPlainTextLineBoundaryNode(before))) value = value.replace(/^ /u, '');
+      if (/[\r\n]/u.test(trailingWhitespace) && (!after || isPlainTextLineBoundaryNode(after))) value = value.replace(/ $/u, '');
     }
     return value;
   }

@@ -1046,12 +1046,61 @@ test('生产 builder 将 menu 及混合嵌套 menu ul ol 输出为有层级的�
   }
 });
 
+test('clipboard 按源顺序稳定搬移同一 li 内的 ul menu ol', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: '<ul><li>根<ul><li>甲</li></ul><menu><li>乙</li></menu><ol><li>丙</li></ol></li></ul>'
+    }
+  }));
+  const $full = load(bundle.html.content);
+  const $clipboard = load(bundle.clipboard.html.content, null, false);
+
+  assert.equal(bundle.status, 'ready');
+  assert.deepEqual($full('main section > ul > li').first().children().map((_, node) => node.tagName).get(), ['ul', 'menu', 'ol']);
+  assert.deepEqual($clipboard('section > ul').first().children().map((_, node) => node.tagName).get(), ['li', 'ul', 'menu', 'ol']);
+  assert.equal(bundle.clipboard.plain.content, ['- 根', '  - 甲', '  - 乙', '  1. 丙'].join('\n'));
+});
+
+test('menu ul ol 列表项逐行折叠横向空白并保留 br 换行', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: [
+        '<menu><li> 甲   乙 <br> 丙   丁 </li></menu>',
+        '<ul><li> 戊\t\t己 <br> 庚   辛 </li></ul>',
+        '<ol><li> 壬   癸 <br> 子   丑 </li></ol>'
+      ].join('')
+    }
+  }));
+
+  assert.equal(bundle.status, 'ready');
+  assert.equal(bundle.clipboard.plain.content, [
+    '- 甲 乙',
+    '丙 丁',
+    '- 戊 己',
+    '庚 辛',
+    '1. 壬 癸',
+    '子 丑'
+  ].join('\n'));
+});
+
 test('生产 builder 在 table tab 行前保留一次 caption 的 inline br 与空白语义', async () => {
   const { buildTypesettingOutput } = await loadOutputModule();
   const bundle = await buildTypesettingOutput(outputRequest({
     document: {
       ...document,
-      body: '<table><caption>季度   <strong>汇总</strong><br>第二   行</caption><tbody><tr><th>项目</th><th>数量</th></tr><tr><td>甲</td><td>2</td></tr></tbody></table>'
+      body: [
+        '<table>',
+        '  <caption>',
+        '    季度   <strong>汇总</strong><br>',
+        '    第二   行',
+        '  </caption>',
+        '  <tbody><tr><th>项目</th><th>数量</th></tr><tr><td>甲</td><td>2</td></tr></tbody>',
+        '</table>'
+      ].join('\n')
     }
   }));
 
