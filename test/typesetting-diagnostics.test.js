@@ -1,5 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { readFileSync } from 'node:fs';
 import { createTypesettingRenderer, renderTypesettingMarkdown } from '../src/typesetting-render.js';
 
 const presentation = {
@@ -68,6 +70,26 @@ test('可控 parse 异常返回安全 RENDER_FAILED 且不泄漏异常', () => {
   }
 });
 
+test('parse 返回 null undefined number 或 Promise 均安全返回 RENDER_FAILED', () => {
+  const parserResults = [
+    ['null', null],
+    ['undefined', undefined],
+    ['number', 42],
+    ['Promise', Promise.resolve('<p>异步结果</p>')]
+  ];
+
+  for (const [label, parserResult] of parserResults) {
+    const render = createTypesettingRenderer({ parseMarkdown: () => parserResult });
+    const result = render(input(`正文-${label}`));
+    assert.equal(result.blocked, true, label);
+    assert.equal(result.diagnostics.length, 1, label);
+    assert.equal(result.diagnostics[0].code, 'RENDER_FAILED', label);
+    assert.equal(result.diagnostics[0].severity, 'blocker', label);
+    assert.match(result.html, /渲染失败/, label);
+    assert.equal(result.blocked, result.diagnostics.some(item => item.severity === 'blocker'), label);
+  }
+});
+
 test('多次渲染不继承 diagnostic id target 或内部状态', () => {
   const render = createTypesettingRenderer({
     parseMarkdown(body) {
@@ -89,5 +111,29 @@ test('多次渲染不继承 diagnostic id target 或内部状态', () => {
     assert.equal(result.diagnostics.length, 1);
     assert.equal(new Set(result.diagnostics.map(item => item.id)).size, result.diagnostics.length);
     assert.equal(result.blocked, result.diagnostics.some(item => item.severity === 'blocker'));
+  }
+});
+
+test('主题校验叶子模块支持两种导入顺序且 renderer 无反向依赖', () => {
+  const rendererUrl = new URL('../src/typesetting-render.js', import.meta.url);
+  const typesettingUrl = new URL('../src/typesetting.js', import.meta.url);
+  const presentationUrl = new URL('../src/typesetting-presentation.js', import.meta.url);
+  const rendererSource = readFileSync(rendererUrl, 'utf8');
+
+  assert.match(rendererSource, /from ['"]\.\/typesetting-presentation\.js['"]/);
+  assert.doesNotMatch(rendererSource, /from ['"]\.\/typesetting\.js['"]/);
+
+  const presentationSource = readFileSync(presentationUrl, 'utf8');
+  assert.doesNotMatch(presentationSource, /^\s*import\s/m);
+  assert.doesNotMatch(presentationSource, /from ['"]\.\/typesetting(?:-render)?\.js['"]/);
+
+  for (const order of [
+    [rendererUrl.href, typesettingUrl.href],
+    [typesettingUrl.href, rendererUrl.href]
+  ]) {
+    const child = spawnSync(process.execPath, ['--input-type=module', '--eval', `for (const url of ${JSON.stringify(order)}) await import(url);`], {
+      encoding: 'utf8'
+    });
+    assert.equal(child.status, 0, child.stderr);
   }
 });

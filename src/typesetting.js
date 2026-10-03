@@ -1,50 +1,20 @@
 import { randomUUID } from 'node:crypto';
 import { mkdir, readFile, readdir, rename, unlink, writeFile } from 'node:fs/promises';
 import path from 'node:path';
+import {
+  areTypesettingThemeSettingsEqual,
+  createDefaultThemeSettings,
+  normalizeTypesettingPresentation,
+  normalizeTypesettingTheme,
+  normalizeTypesettingThemeSettings,
+  typesettingThemeNames
+} from './typesetting-presentation.js';
+
+export { createDefaultThemeSettings, normalizeTypesettingPresentation, typesettingThemeNames };
 
 const fields = ['title', 'author', 'account', 'publishedAt', 'body'];
-const themeSettingKeys = Object.freeze(['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']);
-const themeSettingDefaults = Object.freeze({ primaryColor: '#0F4C81', fontSize: '16px', lineHeight: '1.75', blockSpacing: '1' });
-const themeSettingOptions = Object.freeze({
-  primaryColor: Object.freeze(['#0F4C81', '#009874', '#FA5151', '#FECE00', '#92617E', '#55C9EA', '#B76E79', '#556B2F', '#333333', '#A9A9A9', '#FFB7C5']),
-  fontSize: Object.freeze(['14px', '15px', '16px', '17px', '18px']),
-  lineHeight: Object.freeze(['1.5', '1.65', '1.75', '1.9', '2.05']),
-  blockSpacing: Object.freeze(['0.75', '0.9', '1', '1.15', '1.35'])
-});
-
-export const typesettingThemeNames = Object.freeze(['default', 'grace', 'simple']);
-
-export function createDefaultThemeSettings() {
-  return Object.fromEntries(typesettingThemeNames.map(theme => [theme, { ...themeSettingDefaults }]));
-}
 
 const hasOwn = (value, key) => typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key);
-const hasExactKeys = (value, keys) => typeof value === 'object' && value !== null && !Array.isArray(value) && Object.keys(value).length === keys.length && keys.every(key => hasOwn(value, key));
-
-function normalizeTheme(theme) {
-  if (!typesettingThemeNames.includes(theme)) return invalidDocument('排版主题无效');
-  return theme;
-}
-
-function normalizeThemeSettings(settings) {
-  if (!hasExactKeys(settings, themeSettingKeys)) return invalidDocument('排版主题设置无效');
-  const normalized = {};
-  for (const key of themeSettingKeys) {
-    if (!themeSettingOptions[key].includes(settings[key])) return invalidDocument('排版主题设置无效');
-    normalized[key] = settings[key];
-  }
-  return normalized;
-}
-
-function normalizeDocumentThemeSettings(settings) {
-  if (!hasExactKeys(settings, typesettingThemeNames)) return invalidDocument('排版主题设置无效');
-  return Object.fromEntries(typesettingThemeNames.map(theme => [theme, normalizeThemeSettings(settings[theme])]));
-}
-
-export function normalizeTypesettingPresentation(value) {
-  if (!hasExactKeys(value, ['theme', 'settings'])) return invalidDocument('排版主题配置无效');
-  return { theme: normalizeTheme(value.theme), settings: normalizeThemeSettings(value.settings) };
-}
 
 const emptyDocument = () => ({
   title: '', author: '', account: '', publishedAt: '', body: '', revision: 0, savedAt: '',
@@ -65,8 +35,8 @@ function normalizeDocument(value) {
   const hasThemeSettings = hasOwn(value, 'themeSettings');
   if (hasTheme !== hasThemeSettings) return invalidDocument('排版主题配置无效');
   if (hasTheme) {
-    document.theme = normalizeTheme(value.theme);
-    document.themeSettings = normalizeDocumentThemeSettings(value.themeSettings);
+    document.theme = normalizeTypesettingTheme(value.theme);
+    document.themeSettings = normalizeTypesettingThemeSettings(value.themeSettings);
   }
   if (hasOwn(value, 'convertExternalLinksToFootnotes')) {
     if (typeof value.convertExternalLinksToFootnotes !== 'boolean') return invalidDocument();
@@ -129,7 +99,7 @@ export class TypesettingStore {
       const sameContent = fields.every(field => next[field] === current[field])
         && next.theme === current.theme
         && next.convertExternalLinksToFootnotes === current.convertExternalLinksToFootnotes
-        && typesettingThemeNames.every(theme => themeSettingKeys.every(key => next.themeSettings[theme][key] === current.themeSettings[theme][key]));
+        && areTypesettingThemeSettingsEqual(next.themeSettings, current.themeSettings);
       if (next.revision < current.revision || (next.revision === current.revision && !sameContent)) {
         const error = new Error('文稿已更新，请刷新后重试');
         error.status = 409;

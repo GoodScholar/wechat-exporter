@@ -1,6 +1,6 @@
 import sanitizeHtml from 'sanitize-html';
 import { marked } from 'marked';
-import { normalizeTypesettingPresentation } from './typesetting.js';
+import { normalizeTypesettingPresentation } from './typesetting-presentation.js';
 
 const renderInputKeys = Object.freeze(['body', 'presentation', 'convertExternalLinksToFootnotes']);
 const sanitizerOptions = Object.freeze({
@@ -79,7 +79,9 @@ export function createTypesettingRenderer({ parseMarkdown = defaultParseMarkdown
     }
 
     try {
-      const html = sanitizeHtml(parseMarkdown(body, { gfm: true, breaks: true }), sanitizerOptions);
+      const parsed = parseMarkdown(body, { gfm: true, breaks: true });
+      if (typeof parsed !== 'string') throw new TypeError('parseMarkdown 必须同步返回字符串');
+      const html = sanitizeHtml(parsed, sanitizerOptions);
       return toRenderResult({ html, presentation, diagnostics: [] });
     } catch {
       return toRenderResult({
