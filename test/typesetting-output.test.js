@@ -690,7 +690,7 @@ test('输出标签集合、anchor URL、table span 与 Juice failure seam 严格
 });
 
 test('style value 按 property 拒绝错配关键字隐藏内容和非有限巨大长度', async () => {
-  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const { buildTypesettingOutput, createTypesettingOutputBuilder } = await loadOutputModule();
   const hugeLength = `${'9'.repeat(400)}px`;
   for (const style of [
     'width:block',
@@ -698,7 +698,13 @@ test('style value 按 property 拒绝错配关键字隐藏内容和非有限巨�
     'display:none',
     `width:${hugeLength}`,
     `width:calc(1px * ${'9'.repeat(400)})`,
-    'font-size:999px'
+    'font-size:999px',
+    'font-weight:bold',
+    'white-space:pre',
+    'margin:-1000px',
+    'padding:1000px',
+    'border:100px dashed #fff',
+    'display:block'
   ]) {
     const build = createTypesettingOutputBuilder({
       renderTypesetting: input => readyResult(input.presentation, '<p>正文</p>'),
@@ -707,13 +713,48 @@ test('style value 按 property 拒绝错配关键字隐藏内容和非有限巨�
     });
     await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
   }
-
-  for (const theme of ['default', 'grace', 'simple']) {
-    const bundle = await createTypesettingOutputBuilder()(
-      outputRequest({ presentation: { ...presentation, theme }, document: { ...document, body: '# 标题\n\n正文\n\n> 引用\n\n![图](https://images.example/theme.png)' } })
-    );
-    assert.equal(bundle.status, 'ready');
+  for (const [html, styled] of [
+    ['<h2>正文</h2>', '<h2 style="text-align:center">'],
+    ['<h1>正文</h1>', '<h1 style="padding:12px">'],
+    ['<strong>正文</strong>', '<strong style="color:#0F4C81">']
+  ]) {
+    const tagName = /^<([a-z0-9]+)/iu.exec(html)[1];
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: input => readyResult(input.presentation, html),
+      inlineCss: value => value.replace(`<${tagName}>`, styled),
+      themeCss: ''
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
   }
+
+  const primaryColors = ['#0F4C81', '#009874', '#FA5151', '#FECE00', '#92617E', '#55C9EA', '#B76E79', '#556B2F', '#333333', '#A9A9A9', '#FFB7C5'];
+  const fontSizes = ['14px', '15px', '16px', '17px', '18px'];
+  const lineHeights = ['1.5', '1.65', '1.75', '1.9', '2.05'];
+  const blockSpacings = ['0.75', '0.9', '1', '1.15', '1.35'];
+  const themeCoverageBody = [
+    '# 一级标题', '## 二级标题', '### 三级标题', '正文 [链接](https://example.com) 和 `代码`',
+    '- 无序列表', '1. 有序列表', '> 引用', '```text\n预格式\n```', '---',
+    '| 甲 | 乙 |\n| --- | --- |\n| 一 | 二 |', '![图](https://images.example/theme.png)'
+  ].join('\n\n');
+  let combinations = 0;
+  for (const theme of ['default', 'grace', 'simple']) {
+    for (const primaryColor of primaryColors) {
+      for (const fontSize of fontSizes) {
+        for (const lineHeight of lineHeights) {
+          for (const blockSpacing of blockSpacings) {
+            const bundle = await buildTypesettingOutput(outputRequest({
+              presentation: { theme, settings: { primaryColor, fontSize, lineHeight, blockSpacing } },
+              document: { ...document, body: themeCoverageBody }
+            }));
+            assert.equal(bundle.status, 'ready');
+            assert.match(bundle.clipboard.html.content, /display: block; max-width: 100%; height: auto/u);
+            combinations += 1;
+          }
+        }
+      }
+    }
+  }
+  assert.equal(combinations, 4125);
 });
 
 test('clipboard doocs 修正、图片安全样式、边界与 plain text 共享同一修正后正文', async () => {
@@ -823,6 +864,34 @@ test('plain text 忽略真实块容器 DOM 缩进且保留 inline code 与行内
   assert.equal(bundle.status, 'ready');
   assert.equal(plain, ['引用 加粗 与 强调', '', '术语 A', '解释 x  y', '', '图注 B'].join('\n'));
   assert.doesNotMatch(plain, /(^|\n) /u);
+});
+
+test('plain text 将块容器中行内语义兄弟间的换行空白保留为单个空格', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: [
+        '<blockquote>',
+        '  <strong>甲</strong>',
+        '  <em>乙</em>',
+        '</blockquote>',
+        '<dl>',
+        '  <dt><strong>丙</strong>',
+        '  <em>丁</em></dt>',
+        '  <dd><span>戊</span>',
+        '  <i>己</i></dd>',
+        '</dl>',
+        '<figure>',
+        '  <figcaption><b>庚</b>',
+        '  <small>辛</small></figcaption>',
+        '</figure>'
+      ].join('\n')
+    }
+  }));
+
+  assert.equal(bundle.status, 'ready');
+  assert.equal(bundle.clipboard.plain.content, ['甲 乙', '丙 丁', '戊 己', '', '庚 辛'].join('\n'));
 });
 
 test('完整 HTML 有固定安全文档壳四项元信息和同一 canonical 正文', async () => {

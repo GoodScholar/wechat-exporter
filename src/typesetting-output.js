@@ -36,13 +36,60 @@ const structuralWhitespaceParents = new Set([
   'article', 'aside', 'blockquote', 'body', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'footer', 'header', 'hgroup',
   'main', 'nav', 'section', 'table', 'tbody', 'tfoot', 'thead', 'tr'
 ]);
-const borderStyleValues = new Set(['none', 'solid', 'dashed']);
-const colorStyleProperties = new Set(['color', 'background', 'background-color']);
-const lengthStyleProperties = new Set(['width', 'max-width', 'height', 'max-height']);
-const marginStyleProperties = new Set(['margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left']);
-const paddingStyleProperties = new Set(['padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left']);
-const borderStyleProperties = new Set(['border', 'border-top', 'border-right', 'border-bottom', 'border-left']);
+const inlinePlainTextTags = new Set([
+  'a', 'abbr', 'b', 'bdi', 'bdo', 'cite', 'code', 'data', 'dfn', 'em', 'i', 'img', 'kbd', 'mark', 'q', 'rb', 'rp', 'rt',
+  'rtc', 'ruby', 's', 'samp', 'small', 'span', 'strong', 'sub', 'sup', 'time', 'u', 'var'
+]);
 const cssNumericLimit = 10000;
+const themePrimaryColors = new Set(['#0F4C81', '#009874', '#FA5151', '#FECE00', '#92617E', '#55C9EA', '#B76E79', '#556B2F', '#333333', '#A9A9A9', '#FFB7C5']);
+const themeFontSizes = new Set(['14px', '15px', '16px', '17px', '18px']);
+const themeLineHeights = new Set(['1.5', '1.65', '1.75', '1.9', '2.05']);
+const themeBlockSpacings = new Set(['0.75', '0.9', '1', '1.15', '1.35']);
+const themeMarginValuesByTag = Object.freeze({
+  h1: expandThemeValues(['calc(2em * {s}) auto calc(1em * {s})', 'calc(2em * {s}) 0 calc(1em * {s})', 'calc(1.8em * {s}) 0 calc(.8em * {s})']),
+  h2: expandThemeValues(['calc(2.5em * {s}) auto calc(1em * {s})', 'calc(2em * {s}) 0 calc(.9em * {s})', 'calc(1.6em * {s}) 0 calc(.7em * {s})']),
+  h3: expandThemeValues(['calc(2em * {s}) 0 calc(.75em * {s})', 'calc(1.6em * {s}) 0 calc(.7em * {s})', 'calc(1.4em * {s}) 0 calc(.6em * {s})']),
+  p: expandThemeValues(['calc(1.25em * {s}) 8px', 'calc(1.15em * {s}) 0', 'calc(1em * {s}) 0', '0']),
+  ul: expandThemeValues(['calc(1em * {s}) 0', 'calc(.9em * {s}) 0']),
+  ol: expandThemeValues(['calc(1em * {s}) 0', 'calc(.9em * {s}) 0']),
+  blockquote: expandThemeValues(['calc(1em * {s}) 0', 'calc(1.2em * {s}) 0']),
+  img: expandThemeValues(['calc(.5em * {s}) auto', 'calc(.8em * {s}) auto', 'calc(.6em * {s}) auto']),
+  pre: expandThemeValues(['calc(1em * {s}) 0']),
+  hr: expandThemeValues(['calc(2em * {s}) 0', 'calc(1.6em * {s}) 0'])
+});
+const themePaddingValuesByTagProperty = Object.freeze({
+  'h1.padding': new Set(['0 1em']),
+  'h1.padding-bottom': new Set(['.35em']),
+  'h1.padding-left': new Set(['.6em']),
+  'h2.padding': new Set(['.15em .5em']),
+  'h2.padding-bottom': new Set(['.25em']),
+  'h3.padding-left': new Set(['8px']),
+  'ul.padding-left': new Set(['1.5em', '1.4em']),
+  'ol.padding-left': new Set(['1.5em', '1.4em']),
+  'blockquote.padding': new Set(['1em', '.8em 1em', '.6em .9em']),
+  'code.padding': new Set(['2px 4px']),
+  'pre.padding': new Set(['12px']),
+  'th.padding': new Set(['6px']),
+  'td.padding': new Set(['6px'])
+});
+const themedStylePropertiesByTag = Object.freeze({
+  section: new Set(['color', 'font', 'overflow-wrap']),
+  h1: new Set(['display', 'margin', 'padding', 'padding-bottom', 'padding-left', 'border-bottom', 'border-left', 'color', 'font-size', 'text-align']),
+  h2: new Set(['display', 'margin', 'padding', 'padding-bottom', 'border-bottom', 'background', 'color', 'font-size']),
+  h3: new Set(['margin', 'padding-left', 'border-left', 'color', 'font-size']),
+  p: new Set(['margin', 'letter-spacing']),
+  ul: new Set(['margin', 'padding-left']),
+  ol: new Set(['margin', 'padding-left']),
+  blockquote: new Set(['margin', 'padding', 'border-left', 'background', 'color']),
+  img: new Set(['display', 'max-width', 'height', 'margin', 'border-radius']),
+  a: new Set(['color', 'text-decoration', 'text-underline-offset', 'border-bottom']),
+  code: new Set(['padding', 'background', 'color']),
+  pre: new Set(['overflow', 'margin', 'padding', 'background']),
+  hr: new Set(['margin', 'border', 'border-top']),
+  table: new Set(['width', 'border-collapse']),
+  th: new Set(['padding', 'border']),
+  td: new Set(['padding', 'border'])
+});
 const controlledImageTarget = /^format-target-[a-f0-9]{24}-[1-9]\d*$/u;
 const fixedTypesettingThemeCss = readFileSync(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
 const fixedJuiceOptions = Object.freeze({
@@ -353,22 +400,23 @@ function parseFiniteCssNumber(value, { min = -cssNumericLimit, max = cssNumericL
   return Number.isFinite(number) && number >= min && number <= max ? number : null;
 }
 
-function isSafeCalc(value, { allowNegative = false, min = 0, max = cssNumericLimit } = {}) {
-  const match = /^calc\(\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|%)\s*\*\s*([+-]?(?:\d+(?:\.\d+)?|\.\d+))\s*\)$/iu.exec(value);
-  if (!match) return false;
-  const length = parseFiniteCssNumber(match[1], { min: allowNegative ? -max : min, max });
-  const factor = parseFiniteCssNumber(match[3], { min: 0, max: 10 });
-  return length !== null && factor !== null;
+function expandThemeValues(templates) {
+  const values = new Set();
+  for (const template of templates) {
+    if (!template.includes('{s}')) values.add(template);
+    else for (const spacing of themeBlockSpacings) values.add(template.replaceAll('{s}', spacing));
+  }
+  return values;
 }
 
-function isSafeLength(value, { allowAuto = false, allowNegative = false, allowCalc = true, min = 0, max = cssNumericLimit } = {}) {
-  if (allowAuto && value.toLowerCase() === 'auto') return true;
-  if (allowCalc && isSafeCalc(value, { allowNegative, min, max })) return true;
+function isFixedLength(value, allowed, { min = 0, max = cssNumericLimit } = {}) {
   const match = /^([+-]?(?:\d+(?:\.\d+)?|\.\d+))(px|em|rem|%)?$/iu.exec(value);
-  if (!match) return false;
-  const number = parseFiniteCssNumber(match[1], { min: allowNegative ? -max : min, max });
-  if (number === null) return false;
-  return match[2] !== undefined || number === 0;
+  return Boolean(match) && parseFiniteCssNumber(match[1], { min, max }) !== null && allowed.has(value);
+}
+
+function hasOnlyFiniteCssNumbers(value) {
+  const numbers = value.match(/[+-]?(?:\d+(?:\.\d+)?|\.\d+)/gu) || [];
+  return numbers.every(number => Number.isFinite(Number(number)));
 }
 
 function splitCssValueTokens(value) {
@@ -404,87 +452,102 @@ function splitCssValueTokens(value) {
   return tokens;
 }
 
-function everyCssToken(value, predicate, { min = 1, max = 4 } = {}) {
+function isThemeColor(tagName, property, value) {
+  if (tagName === 'section' && property === 'color') return value === '#25332b';
+  if (tagName === 'h1' && property === 'color') return themePrimaryColors.has(value) || value === '#222';
+  if (tagName === 'h2' && property === 'color') return themePrimaryColors.has(value) || value === '#fff' || value === '#222';
+  if (tagName === 'h2' && property === 'background') return themePrimaryColors.has(value);
+  if (tagName === 'h3' && property === 'color') return value === '#44504a' || value === '#333';
+  if (tagName === 'blockquote' && property === 'color') return value === '#5b625d' || value === '#666';
+  if (tagName === 'blockquote' && property === 'background') return value === '#f3f7f4' || value === '#f7f7f5';
+  if (tagName === 'a' && property === 'color') return themePrimaryColors.has(value) || value === '#576b95';
+  if (tagName === 'code' && property === 'color') return themePrimaryColors.has(value) || value === '#7a4d2d' || value === '#333';
+  if (tagName === 'code' && property === 'background') return ['#f1f3f1', '#f5f5f2', '#f3f3f3'].includes(value);
+  if (tagName === 'pre' && property === 'background') return ['#f1f3f1', '#f5f5f2', '#f3f3f3'].includes(value);
+  return false;
+}
+
+function isPrimaryBorder(value, widths) {
   const tokens = splitCssValueTokens(value);
-  return tokens.length >= min && tokens.length <= max && tokens.every(predicate);
+  return tokens.length === 3 && isFixedLength(tokens[0], widths, { max: 5 })
+    && tokens[1] === 'solid' && themePrimaryColors.has(tokens[2]);
 }
 
-function isSafeColor(value) {
-  return /^#[0-9a-f]{3}(?:[0-9a-f]{3})?$/iu.test(value) || value.toLowerCase() === 'currentcolor';
+function isThemeBorder(tagName, property, value) {
+  if (tagName === 'hr' && property === 'border') return value === '0';
+  if (tagName === 'hr' && property === 'border-top') {
+    return ['1px solid #d7e0d9', '1px solid #d9d7d1', '1px solid #ddd'].includes(value);
+  }
+  if (tagName === 'h1' && property === 'border-bottom') return isPrimaryBorder(value, new Set(['1px', '2px']));
+  if (tagName === 'h1' && property === 'border-left') return isPrimaryBorder(value, new Set(['5px']));
+  if (tagName === 'h2' && property === 'border-bottom') return isPrimaryBorder(value, new Set(['2px']));
+  if (tagName === 'h3' && property === 'border-left') return isPrimaryBorder(value, new Set(['3px']));
+  if (tagName === 'blockquote' && property === 'border-left') {
+    return isPrimaryBorder(value, new Set(['3px', '4px'])) || value === '4px solid #c9c9c9';
+  }
+  if (tagName === 'a' && property === 'border-bottom') return value === '1px solid currentColor';
+  if ((tagName === 'th' || tagName === 'td') && property === 'border') {
+    return ['1px solid #d7e0d9', '1px solid #d9d7d1', '1px solid #ddd'].includes(value);
+  }
+  return false;
 }
 
-function isSafeBorder(value) {
-  if (value === '0') return true;
-  const tokens = splitCssValueTokens(value);
-  if (tokens.length !== 3) return false;
-  return isSafeLength(tokens[0], { max: 100 }) && borderStyleValues.has(tokens[1].toLowerCase()) && isSafeColor(tokens[2]);
-}
-
-function isSafeFont(value) {
+function isThemeFont(value) {
   const match = /^((?:\d+(?:\.\d+)?|\.\d+)px)\/((?:\d+(?:\.\d+)?|\.\d+)) ('PingFang SC'|"PingFang SC"), ('Microsoft YaHei'|"Microsoft YaHei"), sans-serif$/u.exec(value);
   return Boolean(match)
-    && isSafeLength(match[1], { min: 0.01, max: 256 })
-    && parseFiniteCssNumber(match[2], { min: 0.5, max: 4 }) !== null;
+    && isFixedLength(match[1], themeFontSizes, { min: 14, max: 18 })
+    && parseFiniteCssNumber(match[2], { min: 1.5, max: 2.05 }) !== null
+    && themeLineHeights.has(match[2]);
 }
 
-function hasSafeStyleValue(property, value) {
+function hasSafeStyleValue(tagName, property, value) {
   if (!value || value.length > 512 || /[\u0000-\u001f\u007f\\{};<>@!]/u.test(value)
     || /(?:url\s*\(|@import|expression|javascript\s*:|data\s*:|blob\s*:|var\s*\(|env\s*\(|attr\s*\(|behavior)/iu.test(value)
     || !/^[\p{L}\p{N}\s#.,'"%+\-*/()]+$/u.test(value)) return false;
   const lower = value.toLowerCase();
-  if (colorStyleProperties.has(property)) return isSafeColor(value);
-  if (property === 'font') return isSafeFont(value);
-  if (property === 'font-family') {
-    return /^(?:'PingFang SC'|"PingFang SC"), (?:'Microsoft YaHei'|"Microsoft YaHei"), sans-serif$/u.test(value);
+  if (property === 'color' || property === 'background') return isThemeColor(tagName, property, value);
+  if (property === 'font') return isThemeFont(value);
+  if (property === 'overflow-wrap') return lower === 'anywhere';
+  if (property === 'display') return (tagName === 'img' && lower === 'block') || ((tagName === 'h1' || tagName === 'h2') && lower === 'table');
+  if (property === 'font-size') {
+    const values = tagName === 'h1' ? new Set(['1.35em', '1.45em', '1.4em'])
+      : tagName === 'h2' ? new Set(['1.25em', '1.2em']) : new Set(['1.12em', '1.1em', '1.08em']);
+    return isFixedLength(value, values, { min: 1.08, max: 1.45 });
   }
-  if (property === 'font-size') return isSafeLength(value, { min: 0.01, max: 256 });
-  if (property === 'font-weight') {
-    const numeric = parseFiniteCssNumber(value, { min: 1, max: 1000 });
-    return ['normal', 'bold'].includes(lower) || (numeric !== null && Number.isInteger(numeric));
+  if (property === 'text-align') return tagName === 'h1' && lower === 'center';
+  if (property === 'letter-spacing') return tagName === 'p' && isFixedLength(value, new Set(['.04em', '.06em']), { max: 0.06 });
+  if (property === 'text-decoration') return tagName === 'a' && (lower === 'none' || lower === 'underline');
+  if (property === 'text-underline-offset') return tagName === 'a' && isFixedLength(value, new Set(['.15em']), { max: 0.15 });
+  if (property === 'width') return tagName === 'table' && isFixedLength(value, new Set(['100%']), { max: 100 });
+  if (property === 'max-width') return tagName === 'img' && isFixedLength(value, new Set(['100%']), { max: 100 });
+  if (property === 'height') return tagName === 'img' && lower === 'auto';
+  if (property === 'margin') {
+    return hasOnlyFiniteCssNumbers(value) && Boolean(themeMarginValuesByTag[tagName]?.has(value));
   }
-  if (property === 'font-style') return ['normal', 'italic', 'oblique'].includes(lower);
-  if (property === 'line-height') {
-    return parseFiniteCssNumber(value, { min: 0.5, max: 10 }) !== null || isSafeLength(value, { min: 0.01, max: 256 });
+  if (property === 'padding' || property === 'padding-left' || property === 'padding-bottom') {
+    return hasOnlyFiniteCssNumbers(value) && Boolean(themePaddingValuesByTagProperty[`${tagName}.${property}`]?.has(value));
   }
-  if (property === 'letter-spacing') return lower === 'normal' || isSafeLength(value, { allowNegative: true, max: 100 });
-  if (property === 'text-align') return ['left', 'right', 'center', 'justify', 'start', 'end'].includes(lower);
-  if (property === 'text-decoration') return ['none', 'underline'].includes(lower);
-  if (property === 'text-underline-offset') return lower === 'auto' || isSafeLength(value, { allowNegative: true, max: 100 });
-  if (property === 'white-space') return ['normal', 'pre', 'pre-wrap', 'pre-line', 'nowrap', 'break-spaces'].includes(lower);
-  if (property === 'overflow-wrap') return ['normal', 'break-word', 'anywhere'].includes(lower);
-  if (property === 'word-break') return ['normal', 'break-all', 'keep-all', 'break-word'].includes(lower);
-  if (property === 'vertical-align') {
-    return ['baseline', 'sub', 'super', 'top', 'text-top', 'middle', 'bottom', 'text-bottom'].includes(lower)
-      || isSafeLength(value, { allowNegative: true, max: 1000 });
+  if (property === 'border' || property === 'border-top' || property === 'border-bottom' || property === 'border-left') {
+    return hasOnlyFiniteCssNumbers(value) && isThemeBorder(tagName, property, value);
   }
-  if (property === 'display') return ['block', 'table'].includes(lower);
-  if (lengthStyleProperties.has(property)) return isSafeLength(value, { allowAuto: property === 'width' || property === 'height' });
-  if (marginStyleProperties.has(property)) {
-    return everyCssToken(value, token => token.toLowerCase() === 'auto' || isSafeLength(token, { allowNegative: true, max: 1000 }));
-  }
-  if (paddingStyleProperties.has(property)) return everyCssToken(value, token => isSafeLength(token, { max: 1000 }));
-  if (borderStyleProperties.has(property)) return isSafeBorder(value);
-  if (property === 'border-width') return everyCssToken(value, token => isSafeLength(token, { max: 100 }));
-  if (property === 'border-style') return everyCssToken(value, token => borderStyleValues.has(token.toLowerCase()));
-  if (property === 'border-color') return everyCssToken(value, isSafeColor);
-  if (property === 'border-radius') return everyCssToken(value, token => isSafeLength(token, { max: 1000 }));
-  if (property === 'border-collapse') return ['collapse', 'separate'].includes(lower);
-  if (property === 'table-layout') return ['auto', 'fixed'].includes(lower);
-  if (property === 'list-style-type') return ['none', 'disc', 'circle', 'square', 'decimal'].includes(lower);
-  if (property === 'overflow') return lower === 'auto';
+  if (property === 'border-radius') return tagName === 'img' && isFixedLength(value, new Set(['2px', '4px']), { max: 4 });
+  if (property === 'border-collapse') return tagName === 'table' && lower === 'collapse';
+  if (property === 'overflow') return tagName === 'pre' && lower === 'auto';
   return false;
 }
 
-function normalizeStyle(style, { removeVariables = false } = {}) {
+function normalizeStyle(style, { removeVariables = false, tagName, isRoot = false } = {}) {
   const normalized = [];
   const seen = new Set();
+  const tagProperties = tagName === 'section' && !isRoot ? undefined : themedStylePropertiesByTag[tagName];
   for (const declaration of splitStyleDeclarations(style)) {
     const separator = declaration.indexOf(':');
     if (separator <= 0) throw outputError('OUTPUT_GENERATION_FAILED');
     const property = declaration.slice(0, separator).trim().toLowerCase();
     const value = declaration.slice(separator + 1).trim();
     if (removeVariables && property.startsWith('--')) continue;
-    if (!allowedStyleProperties.has(property) || seen.has(property) || !hasSafeStyleValue(property, value)) {
+    if (!allowedStyleProperties.has(property) || !tagProperties?.has(property)
+      || seen.has(property) || !hasSafeStyleValue(tagName, property, value)) {
       throw outputError('OUTPUT_GENERATION_FAILED');
     }
     seen.add(property);
@@ -519,6 +582,7 @@ function allowedAttributesFor(tagName) {
 }
 
 function cleanCanonicalRuntimeAttributes($) {
+  const rootSection = $.root().children('section').first()[0];
   $('*').each((_, element) => {
     const node = $(element);
     node.removeAttr('class');
@@ -530,7 +594,7 @@ function cleanCanonicalRuntimeAttributes($) {
     }
     const style = node.attr('style');
     if (style === undefined) return;
-    const normalized = normalizeStyle(style, { removeVariables: true });
+    const normalized = normalizeStyle(style, { removeVariables: true, tagName: element.tagName, isRoot: element === rootSection });
     if (normalized) node.attr('style', normalized);
     else node.removeAttr('style');
   });
@@ -545,7 +609,7 @@ function validateSafeNodes($) {
     const allowedAttributes = allowedAttributesFor(tagName);
     for (const [name, value] of Object.entries(node.attribs)) {
       if (!allowedAttributes.has(name)) throw outputError('OUTPUT_GENERATION_FAILED');
-      if (name === 'style' && normalizeStyle(value) !== value.replace(/;\s*$/u, '').trim()) {
+      if (name === 'style' && normalizeStyle(value, { tagName, isRoot: node.parent?.type === 'root' }) !== value.replace(/;\s*$/u, '').trim()) {
         throw outputError('OUTPUT_GENERATION_FAILED');
       }
       if (name === 'href' && !hasAllowedHref(value)) throw outputError('OUTPUT_GENERATION_FAILED');
@@ -574,7 +638,9 @@ function normalizedDom($) {
       'tag',
       node.tagName.toLowerCase(),
       Object.entries(node.attribs)
-        .map(([name, value]) => [name, name === 'style' ? normalizeStyle(value) : value])
+        .map(([name, value]) => [name, name === 'style'
+          ? normalizeStyle(value, { tagName: node.tagName.toLowerCase(), isRoot: node.parent?.type === 'root' })
+          : value])
         .sort(([left], [right]) => left.localeCompare(right)),
       (node.children || []).map(normalizeNode)
     ];
@@ -711,11 +777,29 @@ function renderTablePlainText($, table, depth) {
   return output;
 }
 
+function isVisibleInlinePlainNode($, node) {
+  if (node?.type === 'text') return /\S/u.test((node.data || '').replace(/\u00a0/gu, ' '));
+  if (node?.type !== 'tag' || !inlinePlainTextTags.has(node.tagName.toLowerCase())) return false;
+  return node.tagName === 'img' || /\S/u.test($(node).text().replace(/\u00a0/gu, ' '));
+}
+
+function inlineWhitespaceBetweenVisibleSiblings($, node) {
+  const siblings = node.parent?.children || [];
+  const index = siblings.indexOf(node);
+  let before = index - 1;
+  let after = index + 1;
+  while (before >= 0 && siblings[before].type === 'text' && !/\S/u.test(siblings[before].data || '')) before -= 1;
+  while (after < siblings.length && siblings[after].type === 'text' && !/\S/u.test(siblings[after].data || '')) after += 1;
+  return isVisibleInlinePlainNode($, siblings[before]) && isVisibleInlinePlainNode($, siblings[after]);
+}
+
 function renderPlainTextNode($, node, depth = 0) {
   if (node.type === 'text') {
     const raw = node.data || '';
     const value = raw.replace(/[\s\u00a0]+/gu, ' ');
-    if (!value.trim() && /[\r\n]/u.test(raw) && structuralWhitespaceParents.has(node.parent?.tagName)) return '';
+    if (!value.trim() && /[\r\n]/u.test(raw) && structuralWhitespaceParents.has(node.parent?.tagName)) {
+      return inlineWhitespaceBetweenVisibleSiblings($, node) ? ' ' : '';
+    }
     return value;
   }
   if (node.type !== 'tag') return '';
