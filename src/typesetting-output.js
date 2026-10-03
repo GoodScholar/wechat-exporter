@@ -42,6 +42,13 @@ const normalizeLineEndings = value => value.replace(/\r\n?/gu, '\n');
 const isNonEmptyString = value => typeof value === 'string' && value.length > 0;
 const isPositiveInteger = value => Number.isSafeInteger(value) && value > 0;
 
+function isDenseExactArray(value) {
+  if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype
+    || Reflect.ownKeys(value).length !== value.length + 1 || !hasOwn(value, 'length')) return false;
+  for (let index = 0; index < value.length; index += 1) if (!hasOwn(value, index)) return false;
+  return true;
+}
+
 function outputError(code) {
   const definition = errorDefinitions[code];
   const error = new Error(definition.message);
@@ -61,7 +68,7 @@ function normalizeOutputRequest(value) {
     if (typeof value.document[key] !== 'string') throw outputError('OUTPUT_REQUEST_INVALID');
     document[key] = normalizeLineEndings(value.document[key]);
   }
-  if (typeof value.convertExternalLinksToFootnotes !== 'boolean' || !Array.isArray(value.failedImageTargets)) {
+  if (typeof value.convertExternalLinksToFootnotes !== 'boolean' || !isDenseExactArray(value.failedImageTargets)) {
     throw outputError('OUTPUT_REQUEST_INVALID');
   }
   if (value.failedImageTargets.some(target => typeof target !== 'string' || target.length === 0)) {
@@ -99,7 +106,7 @@ function samePresentation(left, right) {
 function validateRenderResult(value, expectedPresentation) {
   if (!hasExactKeys(value, renderResultKeys)
     || typeof value.html !== 'string'
-    || !Array.isArray(value.diagnostics)
+    || !isDenseExactArray(value.diagnostics)
     || typeof value.blocked !== 'boolean') {
     throw outputError('OUTPUT_GENERATION_FAILED');
   }
@@ -123,7 +130,7 @@ function isPreviewTarget(target, $) {
 }
 
 function hasValidTargets(diagnostic, body, $, kind, count) {
-  if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
+  if (!isDenseExactArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
   if (count !== undefined && diagnostic.targets.length !== count) return false;
   if (!diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, $))) return false;
   const targetKeys = diagnostic.targets.map(target => target.kind === 'source'
@@ -286,11 +293,11 @@ export function createTypesettingOutputBuilder({
         presentation: snapshot.presentation,
         convertExternalLinksToFootnotes: snapshot.convertExternalLinksToFootnotes
       });
+      if (rendered instanceof Promise) {
+        Promise.prototype.then.call(rendered, undefined, () => {});
+        throw outputError('OUTPUT_GENERATION_FAILED');
+      }
     } catch {
-      throw outputError('OUTPUT_GENERATION_FAILED');
-    }
-    if (rendered && typeof rendered.then === 'function') {
-      Promise.resolve(rendered).catch(() => {});
       throw outputError('OUTPUT_GENERATION_FAILED');
     }
     const result = validateRenderResult(rendered, snapshot.presentation);

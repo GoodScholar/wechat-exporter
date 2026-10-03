@@ -62,6 +62,18 @@ function withHiddenExtra(value) {
   return copy;
 }
 
+function withArrayExtra(values, key) {
+  const copy = [...values];
+  Object.defineProperty(copy, key, { value: true });
+  return copy;
+}
+
+function withCustomArrayPrototype(values) {
+  const copy = [...values];
+  Object.setPrototypeOf(copy, Object.create(Array.prototype));
+  return copy;
+}
+
 test('输出依赖和共享 Markdown fixture 固定版本与完整 artifact shape', async () => {
   const packageJson = await readJson('../package.json');
   const lock = await readJson('../package-lock.json');
@@ -262,6 +274,108 @@ test('输出 builder 要求 exact record 为普通对象且拒绝异步 renderer
     themeCss: 'fixed theme css'
   });
   await assertOutputError(asyncBuild(valid), 'OUTPUT_GENERATION_FAILED');
+});
+
+test('输出 builder 拒绝稀疏或带额外属性的契约数组', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const ordinaryBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => blockedResult(input.presentation, '', input.body),
+    inlineCss: () => 'unexpected',
+    themeCss: 'fixed theme css'
+  });
+  const sparseFailedTargets = new Array(1);
+  for (const failedImageTargets of [
+    sparseFailedTargets,
+    withArrayExtra([], 'hidden'),
+    withArrayExtra([], Symbol('extra')),
+    withCustomArrayPrototype([])
+  ]) {
+    await assertOutputError(ordinaryBuild(outputRequest({ failedImageTargets })), 'OUTPUT_REQUEST_INVALID');
+  }
+
+  const body = '数组契约';
+  const validBlocker = blocker(body);
+  const sparseDiagnostics = new Array(2);
+  sparseDiagnostics[1] = validBlocker;
+  for (const diagnostics of [
+    sparseDiagnostics,
+    withArrayExtra([validBlocker], 'hidden'),
+    withArrayExtra([validBlocker], Symbol('extra')),
+    withCustomArrayPrototype([validBlocker])
+  ]) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: () => ({ html: '', presentation, diagnostics, blocked: true }),
+      inlineCss: () => 'unexpected',
+      themeCss: 'fixed theme css'
+    });
+    await assertOutputError(build(outputRequest({ document: { ...document, body } })), 'OUTPUT_GENERATION_FAILED');
+  }
+
+  const preview = 'array-preview-target';
+  const html = `<a href="https://example.com" data-format-target="${preview}">链接</a>`;
+  const previewTarget = { kind: 'preview', id: preview };
+  const sparseTargets = new Array(2);
+  sparseTargets[1] = previewTarget;
+  for (const targets of [
+    sparseTargets,
+    withArrayExtra([previewTarget], 'hidden'),
+    withArrayExtra([previewTarget], Symbol('extra')),
+    withCustomArrayPrototype([previewTarget])
+  ]) {
+    const footnote = {
+      id: 'diagnostic-footnote', code: 'EXTERNAL_LINK_TO_FOOTNOTE', severity: 'conversion', message: '已转换脚注。',
+      targets, meta: { footnote: 1, occurrences: targets.length }
+    };
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: () => ({ html, presentation, diagnostics: [blocker(body), footnote], blocked: true }),
+      inlineCss: () => 'unexpected',
+      themeCss: 'fixed theme css'
+    });
+    await assertOutputError(build(outputRequest({ document: { ...document, body } })), 'OUTPUT_GENERATION_FAILED');
+  }
+});
+
+test('输出 builder 不读取 then getter并安全拒绝 Promise 与自定义 thenable', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  let thenGetterReads = 0;
+  const throwingThenGetter = blockedResult(presentation);
+  Object.defineProperty(throwingThenGetter, 'then', {
+    get() {
+      thenGetterReads += 1;
+      throw new Error('then getter sentinel /Users/private/source.md');
+    }
+  });
+  const customThenable = {
+    then() {
+      throw new Error('custom thenable sentinel /Users/private/source.md');
+    }
+  };
+  for (const rendered of [throwingThenGetter, customThenable]) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: () => rendered,
+      inlineCss: () => 'unexpected',
+      themeCss: 'fixed theme css'
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+  }
+  assert.equal(thenGetterReads, 0);
+
+  const unhandled = [];
+  const onUnhandled = reason => unhandled.push(reason);
+  process.on('unhandledRejection', onUnhandled);
+  try {
+    const rejectedPromise = Promise.reject(new Error('promise rejection sentinel /Users/private/source.md'));
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: () => rejectedPromise,
+      inlineCss: () => 'unexpected',
+      themeCss: 'fixed theme css'
+    });
+    await assertOutputError(build(outputRequest()), 'OUTPUT_GENERATION_FAILED');
+    await new Promise(resolve => setImmediate(resolve));
+    assert.deepEqual(unhandled, []);
+  } finally {
+    process.off('unhandledRejection', onUnhandled);
+  }
 });
 
 test('输出 builder 按 #6 判别联合严格校验 diagnostics', async () => {
