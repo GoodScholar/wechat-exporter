@@ -95,12 +95,38 @@ function renderResult(request, html) {
   };
 }
 
-function outputBundle(snapshot, { status = snapshot.document.body.trim() ? 'ready' : 'blocked', marker = snapshot.document.title || snapshot.document.body || 'empty' } = {}) {
-  const markdown = {
+function normalizeOutputString(value) {
+  return value.replace(/\r\n?/gu, '\n');
+}
+
+function safeOutputBaseName(title) {
+  let basename = normalizeOutputString(title).trim().replace(/[<>:"/\\|?*\u0000-\u001F]/gu, '_');
+  basename = basename.replace(/^\.+/u, '').replace(/[. ]+$/u, '');
+  basename = [...basename].slice(0, 80).join('').replace(/[. ]+$/u, '');
+  return basename || '未命名文章';
+}
+
+function markdownArtifact(document) {
+  const normalized = Object.fromEntries(Object.entries(document).map(([key, value]) => [key, normalizeOutputString(value)]));
+  const body = normalized.body.replace(/\n+$/u, '');
+  return {
     mimeType: 'text/markdown;charset=utf-8',
-    filename: `server-${marker}.md`,
-    content: `SERVER:${marker}`
+    filename: `${safeOutputBaseName(document.title)}.md`,
+    content: [
+      '---',
+      `title: ${JSON.stringify(normalized.title)}`,
+      `author: ${JSON.stringify(normalized.author)}`,
+      `account: ${JSON.stringify(normalized.account)}`,
+      `publishedAt: ${JSON.stringify(normalized.publishedAt)}`,
+      '---',
+      '',
+      `${body}\n`
+    ].join('\n')
   };
+}
+
+function outputBundle(snapshot, { status = snapshot.document.body.trim() ? 'ready' : 'blocked', marker = snapshot.document.title || snapshot.document.body || 'empty' } = {}) {
+  const markdown = markdownArtifact(snapshot.document);
   return {
     schemaVersion: 1,
     status,
@@ -112,9 +138,34 @@ function outputBundle(snapshot, { status = snapshot.document.body.trim() ? 'read
     } : null,
     html: status === 'ready' ? {
       mimeType: 'text/html;charset=utf-8',
-      filename: `server-${marker}.html`,
+      filename: `${safeOutputBaseName(snapshot.document.title)}.html`,
       content: `<!doctype html><html><body>${escapeHtml(marker)}</body></html>`
     } : null
+  };
+}
+
+const typedOutputErrors = Object.freeze({
+  OUTPUT_REQUEST_FORBIDDEN: Object.freeze({ status: 403, message: '排版输出请求被拒绝', retryable: false, localMessage: '当前请求来源或格式不受支持，仍可复制或下载 Markdown。' }),
+  OUTPUT_METHOD_NOT_ALLOWED: Object.freeze({ status: 405, message: '排版输出仅支持 POST 请求', retryable: false, localMessage: '输出请求方法不受支持，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_JSON_INVALID: Object.freeze({ status: 400, message: '排版输出 JSON 无效', retryable: false, localMessage: '输出请求格式无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_TOO_LARGE: Object.freeze({ status: 413, message: '排版输出请求过大', retryable: false, localMessage: '正文过长，请缩短正文后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_INVALID: Object.freeze({ status: 400, message: '排版输出请求无效', retryable: false, localMessage: '输出数据无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false, localMessage: '图片状态已变化，正在重新检查排版；仍可复制或下载 Markdown。' }),
+  OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true, localMessage: '未能生成富文本，请稍后重试；仍可复制或下载 Markdown。' })
+});
+
+function typedOutputError(code, overrides = {}) {
+  const definition = typedOutputErrors[code];
+  return {
+    status: overrides.status ?? definition.status,
+    body: overrides.body ?? {
+      error: {
+        code,
+        message: definition.message,
+        retryable: definition.retryable,
+        ...(overrides.error || {})
+      }
+    }
   };
 }
 
@@ -287,11 +338,14 @@ test('客户端只接受 exact 六键 OutputBundle 和 exact nested snapshot art
     ['markdown 额外键', value => { value.markdown.extra = true; }],
     ['markdown MIME 错误', value => { value.markdown.mimeType = 'text/markdown'; }],
     ['markdown filename 错误类型', value => { value.markdown.filename = 1; }],
+    ['markdown filename 与当前标题漂移', value => { value.markdown.filename = '错误旧标题.md'; }],
+    ['markdown content 与当前文稿漂移', value => { value.markdown.content = 'WRONG MARKDOWN CONTENT'; }],
     ['clipboard 额外键', value => { value.clipboard.extra = true; }],
     ['clipboard html MIME 错误', value => { value.clipboard.html.mimeType = 'text/plain'; }],
     ['clipboard plain 缺键', value => { delete value.clipboard.plain.content; }],
     ['完整 HTML 额外键', value => { value.html.extra = true; }],
     ['完整 HTML MIME 错误', value => { value.html.mimeType = 'text/html'; }],
+    ['完整 HTML filename 与当前标题漂移', value => { value.html.filename = '错误旧标题.html'; }],
     ['ready 缺 clipboard', value => { value.clipboard = null; }],
     ['blocked 携带产物', value => { value.status = 'blocked'; }],
     ['snapshot 值漂移', value => { value.snapshot.document.body = '其他正文'; }]
@@ -306,6 +360,46 @@ test('客户端只接受 exact 六键 OutputBundle 和 exact nested snapshot art
   blockedSnapshot.document.body = '';
   const blocked = outputBundle(blockedSnapshot, { status: 'blocked', marker: 'blocked' });
   assert.equal(await page.evaluate(({ value, expected }) => window.isValidOutputBundle(value, expected), { value: blocked, expected: blockedSnapshot }), true);
+});
+
+test('当前 snapshot 的 Markdown 内容文件名或 HTML 文件名漂移时不开放 gate 且不下载 HTML', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const mutations = [
+    ['markdown-content', bundle => { bundle.markdown.content = 'WRONG MARKDOWN CONTENT'; }],
+    ['markdown-filename', bundle => { bundle.markdown.filename = '错误旧标题.md'; }],
+    ['html-filename', bundle => { bundle.html.filename = '错误旧标题.html'; }]
+  ];
+  let mutation = mutations[0][1];
+  await installRenderRoute(page);
+  await installOutputRoute(page, [], (route, request) => {
+    const bundle = outputBundle(request);
+    mutation(bundle);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(bundle) });
+  });
+  await page.goto(base + '/typesetting');
+
+  for (const [index, [name, mutate]] of mutations.entries()) {
+    mutation = mutate;
+    await page.getByLabel('标题').fill(`当前标题-${index}`);
+    await page.getByLabel('Markdown 正文').fill(`当前正文-${index}`);
+    await waitForRenderState(page, 'current');
+    await page.waitForFunction(() => document.querySelector('#output-error')?.textContent.length > 0);
+    assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), false, name);
+    assert.equal(await page.locator('#copy-wechat').isDisabled(), true, name);
+    assert.equal(await page.locator('#download-html').isDisabled(), true, name);
+    const before = await page.evaluate(() => ({ blobs: window.__createdBlobs.length, clicks: window.__downloadClicks.length }));
+    await page.evaluate(() => document.querySelector('#download-html').dispatchEvent(new MouseEvent('click', { bubbles: true })));
+    await page.waitForTimeout(30);
+    assert.deepEqual(await page.evaluate(() => ({ blobs: window.__createdBlobs.length, clicks: window.__downloadClicks.length })), before, name);
+    const fallback = await currentMarkdownArtifact(page);
+    assert.deepEqual(fallback, markdownArtifact({
+      title: `当前标题-${index}`,
+      author: '',
+      account: '',
+      publishedAt: '',
+      body: `当前正文-${index}`
+    }), `${name} 仍须保留当前 Markdown fallback`);
+  }
 });
 
 test('最新 render 原子应用后预生成 ready 和 blocker 且请求只含完整 output snapshot', async t => {
@@ -936,7 +1030,7 @@ test('blocker conversion advisory 静态占位门禁只禁止 blocker 且始终�
     assert.equal(await page.locator('#copy-markdown').isEnabled(), true, entry.label);
     assert.equal(await page.locator('#download-markdown').isEnabled(), true, entry.label);
     const artifact = await currentMarkdownArtifact(page);
-    assert.equal(artifact.content, `SERVER:${entry.body || 'EMPTY_BODY'}`, `${entry.label} 必须保留当前 Markdown`);
+    assert.deepEqual(artifact, markdownArtifact({ title: '', author: '', account: '', publishedAt: '', body: entry.body }), `${entry.label} 必须保留当前 Markdown`);
   }
 });
 
@@ -1010,6 +1104,180 @@ test('HTML gate disabled pending blocker stale error 且 Markdown 下载始终�
   assert.equal(await page.locator('#copy-wechat').isDisabled(), true);
   assert.equal(await page.locator('#download-html').isDisabled(), true);
   assert.equal(await page.locator('#download-markdown').isEnabled(), true);
+});
+
+test('真实 Chromium 按 exact typed output error code 显示固定本地安全指引且仅 target-invalid 重新 render', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const renderCalls = [];
+  const outputCalls = [];
+  let nextErrorCode;
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderCalls.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(renderResult(request)) });
+  });
+  await installOutputRoute(page, outputCalls, (route, request) => {
+    if (nextErrorCode) {
+      const response = typedOutputError(nextErrorCode);
+      nextErrorCode = undefined;
+      return route.fulfill({ status: response.status, contentType: 'application/json', body: JSON.stringify(response.body) });
+    }
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request)) });
+  });
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('标题').fill('typed error 标题');
+  await page.getByLabel('Markdown 正文').fill('typed error 基线');
+  await waitForReadyOutput(page);
+
+  const ordinaryCodes = [
+    'OUTPUT_REQUEST_FORBIDDEN',
+    'OUTPUT_METHOD_NOT_ALLOWED',
+    'OUTPUT_JSON_INVALID',
+    'OUTPUT_REQUEST_TOO_LARGE',
+    'OUTPUT_REQUEST_INVALID',
+    'OUTPUT_GENERATION_FAILED'
+  ];
+  for (const [index, code] of ordinaryCodes.entries()) {
+    const renderBefore = renderCalls.length;
+    const outputBefore = outputCalls.length;
+    nextErrorCode = code;
+    const body = `typed-error-${index}`;
+    await page.getByLabel('Markdown 正文').fill(body);
+    await waitForCount(outputCalls, outputBefore + 1);
+    await page.waitForFunction(message => document.querySelector('#output-error')?.textContent === message, typedOutputErrors[code].localMessage);
+    await page.waitForTimeout(260);
+    assert.equal(renderCalls.length, renderBefore + 1, `${code} 不得自动重试 render`);
+    assert.equal(outputCalls.length, outputBefore + 1, `${code} 不得自动重试 output`);
+    assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), false, code);
+    assert.deepEqual(await currentMarkdownArtifact(page), markdownArtifact({
+      title: 'typed error 标题', author: '', account: '', publishedAt: '', body
+    }), `${code} 仍必须提供当前 Markdown fallback`);
+  }
+
+  const renderBeforeTarget = renderCalls.length;
+  const outputBeforeTarget = outputCalls.length;
+  nextErrorCode = 'OUTPUT_FAILED_IMAGE_TARGET_INVALID';
+  await page.getByLabel('Markdown 正文').fill('target-invalid 当前请求');
+  await waitForCount(outputCalls, outputBeforeTarget + 1);
+  await page.waitForFunction(message => document.querySelector('#output-error')?.textContent === message,
+    typedOutputErrors.OUTPUT_FAILED_IMAGE_TARGET_INVALID.localMessage);
+  await waitForReadyOutput(page);
+  assert.equal(renderCalls.length, renderBeforeTarget + 2, 'exact current target-invalid 必须额外重新 render 一次');
+  assert.equal(outputCalls.length, outputBeforeTarget + 2, 'target-invalid 只能在新 render 后重建 output');
+});
+
+test('typed output error 的 wrong shape status retryable message 和 unknown code 均不触发重试', async t => {
+  const { page, base } = await withBrowser(t);
+  const renderCalls = [];
+  const outputCalls = [];
+  let nextResponse;
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderCalls.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(renderResult(request)) });
+  });
+  await installOutputRoute(page, outputCalls, (route, request) => {
+    if (nextResponse) {
+      const response = nextResponse;
+      nextResponse = undefined;
+      return route.fulfill({ status: response.status, contentType: 'application/json', body: JSON.stringify(response.body) });
+    }
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request)) });
+  });
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('error shape 基线');
+  await waitForReadyOutput(page);
+
+  const exactTarget = typedOutputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID');
+  const cases = [
+    ['outer extra', { ...exactTarget, body: { ...exactTarget.body, extra: true } }],
+    ['inner missing', { ...exactTarget, body: { error: { code: 'OUTPUT_FAILED_IMAGE_TARGET_INVALID', retryable: false } } }],
+    ['wrong status', typedOutputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID', { status: 409 })],
+    ['wrong retryable', typedOutputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID', { error: { retryable: true } })],
+    ['wrong message', typedOutputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID', { error: { message: '伪造服务端消息 /private/path' } })],
+    ['unknown code', { status: 400, body: { error: { code: 'OUTPUT_UNKNOWN', message: '未知', retryable: false } } }]
+  ];
+  const genericMessage = '未能生成富文本，请刷新页面后重试；仍可复制或下载 Markdown。';
+  for (const [index, [name, response]] of cases.entries()) {
+    const renderBefore = renderCalls.length;
+    const outputBefore = outputCalls.length;
+    nextResponse = response;
+    await page.getByLabel('Markdown 正文').fill(`error-shape-${index}`);
+    await waitForCount(outputCalls, outputBefore + 1);
+    await page.waitForFunction(message => document.querySelector('#output-error')?.textContent === message, genericMessage);
+    await page.waitForTimeout(260);
+    assert.equal(renderCalls.length, renderBefore + 1, `${name} 不得重新 render`);
+    assert.equal(outputCalls.length, outputBefore + 1, `${name} 不得重试 output`);
+  }
+});
+
+test('旧 typed target-invalid error 不得让新 ready 状态重新 render 或覆盖提示', async t => {
+  const { page, base } = await withBrowser(t);
+  const renderCalls = [];
+  const outputCalls = [];
+  const held = [];
+  let holdNext = false;
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderCalls.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(renderResult(request)) });
+  });
+  await installOutputRoute(page, outputCalls, async (route, request) => {
+    if (holdNext) {
+      holdNext = false;
+      await new Promise(resolve => held.push(resolve));
+      const response = typedOutputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID');
+      return route.fulfill({ status: response.status, contentType: 'application/json', body: JSON.stringify(response.body) });
+    }
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify(outputBundle(request)) });
+  });
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('旧 error 基线');
+  await waitForReadyOutput(page);
+
+  holdNext = true;
+  await page.evaluate(() => { void window.requestOutput(); });
+  await waitForCount(held, 1);
+  await page.getByLabel('Markdown 正文').fill('新 ready 正文');
+  await waitForReadyOutput(page);
+  const beforeRelease = {
+    renders: renderCalls.length,
+    outputs: outputCalls.length,
+    status: await page.locator('#output-status').textContent(),
+    error: await page.locator('#output-error').textContent(),
+    artifact: await currentMarkdownArtifact(page)
+  };
+  held[0]();
+  await page.waitForTimeout(300);
+  assert.equal(renderCalls.length, beforeRelease.renders, '旧 target-invalid 不得重新 render');
+  assert.equal(outputCalls.length, beforeRelease.outputs, '旧 target-invalid 不得重试 output');
+  assert.equal(await page.locator('#output-status').textContent(), beforeRelease.status);
+  assert.equal(await page.locator('#output-error').textContent(), beforeRelease.error);
+  assert.deepEqual(await currentMarkdownArtifact(page), beforeRelease.artifact);
+  assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), true);
+});
+
+test('真实 413 typed error 明确提示缩短正文且 Markdown fallback 仍可复制', async t => {
+  const { page, base } = await withBrowser(t, { initScript: installOutputBrowserSpies });
+  const outputRequests = [];
+  page.on('request', request => {
+    if (new URL(request.url()).pathname === '/api/typesetting/output') outputRequests.push(request);
+  });
+  await installRenderRoute(page);
+  await page.goto(base + '/typesetting');
+  await page.getByLabel('标题').fill('过长正文');
+  await page.getByLabel('Markdown 正文').fill('x'.repeat(154 * 1024));
+  await page.waitForFunction(message => document.querySelector('#output-error')?.textContent === message,
+    typedOutputErrors.OUTPUT_REQUEST_TOO_LARGE.localMessage);
+  await page.waitForTimeout(260);
+  assert.equal(outputRequests.length, 2, '初始 blocker 与过长正文各发起一次 output，413 不重试');
+  assert.equal(await page.evaluate(() => window.hasFreshReadyOutput()), false);
+  const fallback = await currentMarkdownArtifact(page);
+  assert.equal(fallback.filename, '过长正文.md');
+  assert.equal(fallback.content.endsWith(`${'x'.repeat(154 * 1024)}\n`), true);
+  await page.locator('#copy-markdown').click();
+  await page.waitForFunction(() => window.__writeTextCalls.length === 1);
+  assert.equal(await page.evaluate(() => window.__writeTextCalls[0]), fallback.content);
 });
 
 test('clipboard 降级在非 secure 无 ClipboardItem supports false 与 write reject 时无 rich fallback', async t => {
@@ -1277,7 +1545,10 @@ test('Markdown 与 metadata writeText 乱序 settle 不得让旧结果覆盖新�
   await page.getByRole('button', { name: '复制作者', exact: true }).click();
   await page.locator('#copy-markdown').click();
   await page.waitForFunction(() => window.__pendingWriteTexts.length === 2);
-  assert.deepEqual(await page.evaluate(() => window.__pendingWriteTexts.map(item => item.value)), ['当前作者', 'SERVER:writeText 乱序']);
+  assert.deepEqual(await page.evaluate(() => window.__pendingWriteTexts.map(item => item.value)), [
+    '当前作者',
+    '---\ntitle: ""\nauthor: "\u5f53\u524d\u4f5c\u8005"\naccount: ""\npublishedAt: ""\n---\n\nwriteText 乱序\n'
+  ]);
   await page.evaluate(() => window.__pendingWriteTexts[1].resolve());
   await page.waitForFunction(() => document.querySelector('#output-status')?.textContent === '已复制 Markdown');
   await page.evaluate(() => window.__pendingWriteTexts[0].reject(new Error('old metadata reject')));

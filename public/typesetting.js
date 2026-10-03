@@ -23,6 +23,16 @@ const severityNames = ['blocker', 'conversion', 'advisory'];
 const safeRemovedTypes = ['script', 'style', 'form', 'event-handler', 'unsafe-url'];
 const specialContentTypes = ['video', 'audio', 'embed', 'mini-program', 'poll'];
 const imageDiagnosticCodes = ['IMAGE_LOAD_FAILED', 'IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE'];
+const outputErrorDefinitions = Object.freeze({
+  OUTPUT_REQUEST_FORBIDDEN: Object.freeze({ status: 403, message: '排版输出请求被拒绝', retryable: false, localMessage: '当前请求来源或格式不受支持，仍可复制或下载 Markdown。' }),
+  OUTPUT_METHOD_NOT_ALLOWED: Object.freeze({ status: 405, message: '排版输出仅支持 POST 请求', retryable: false, localMessage: '输出请求方法不受支持，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_JSON_INVALID: Object.freeze({ status: 400, message: '排版输出 JSON 无效', retryable: false, localMessage: '输出请求格式无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_TOO_LARGE: Object.freeze({ status: 413, message: '排版输出请求过大', retryable: false, localMessage: '正文过长，请缩短正文后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_REQUEST_INVALID: Object.freeze({ status: 400, message: '排版输出请求无效', retryable: false, localMessage: '输出数据无效，请刷新页面后重试；仍可复制或下载 Markdown。' }),
+  OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false, localMessage: '图片状态已变化，正在重新检查排版；仍可复制或下载 Markdown。' }),
+  OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true, localMessage: '未能生成富文本，请稍后重试；仍可复制或下载 Markdown。' })
+});
+const genericOutputErrorMessage = '未能生成富文本，请刷新页面后重试；仍可复制或下载 Markdown。';
 const previewAllowedTags = new Set([
   'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
   'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'hr', 'li', 'menu', 'ol', 'p', 'pre', 'ul',
@@ -120,16 +130,28 @@ function isValidOutputArtifact(artifact, mimeType, filename = false) {
   return hasExactKeys(artifact, keys) && artifact.mimeType === mimeType
     && (!filename || isNonEmptyString(artifact.filename)) && typeof artifact.content === 'string';
 }
+function parseTypedOutputError(status, payload) {
+  if (!hasExactKeys(payload, ['error']) || !hasExactKeys(payload.error, ['code', 'message', 'retryable'])) return;
+  const definition = outputErrorDefinitions[payload.error.code];
+  if (!definition || status !== definition.status || payload.error.message !== definition.message
+    || payload.error.retryable !== definition.retryable) return;
+  return { code: payload.error.code, localMessage: definition.localMessage };
+}
 function isValidOutputBundle(value, snapshot) {
   if (!hasExactKeys(value, ['schemaVersion', 'status', 'snapshot', 'markdown', 'clipboard', 'html'])
     || value.schemaVersion !== 1 || !['ready', 'blocked'].includes(value.status)
     || !isValidOutputSnapshot(value.snapshot) || !sameOutputSnapshot(value.snapshot, snapshot)
-    || !isValidOutputArtifact(value.markdown, 'text/markdown;charset=utf-8', true)) return false;
+    || !sameExactValue(value.markdown, {
+      mimeType: 'text/markdown;charset=utf-8',
+      filename: `${safeOutputBaseName(snapshot.document.title)}.md`,
+      content: buildNormalizedMarkdown(snapshot.document)
+    })) return false;
   if (value.status === 'blocked') return value.clipboard === null && value.html === null;
   return hasExactKeys(value.clipboard, ['html', 'plain'])
     && isValidOutputArtifact(value.clipboard.html, 'text/html')
     && isValidOutputArtifact(value.clipboard.plain, 'text/plain')
-    && isValidOutputArtifact(value.html, 'text/html;charset=utf-8', true);
+    && isValidOutputArtifact(value.html, 'text/html;charset=utf-8', true)
+    && value.html.filename === `${safeOutputBaseName(snapshot.document.title)}.html`;
 }
 function normalizeOutputString(value) { return value.replace(/\r\n?/gu, '\n'); }
 function safeOutputBaseName(title) {
@@ -206,19 +228,14 @@ async function requestOutput() {
       try { errorPayload = await response.json(); } catch { /* Treat malformed error responses as ordinary output failures. */ }
       if (!isCurrentOutputRequest(requestVersion, version, renderVersion, snapshot)) return;
       outputPending = false;
-      const failedTargetInvalid = response.status === 400
-        && hasExactKeys(errorPayload, ['error'])
-        && hasExactKeys(errorPayload.error, ['code', 'message', 'retryable'])
-        && errorPayload.error.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID'
-        && typeof errorPayload.error.message === 'string'
-        && errorPayload.error.retryable === false;
-      if (failedTargetInvalid) {
-        syncOutputControls();
+      const typedError = parseTypedOutputError(response.status, errorPayload);
+      if (typedError?.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID') {
         markRenderStale();
         schedulePreview();
+        syncOutputControls('failure', typedError.localMessage);
         return;
       }
-      syncOutputControls('failure');
+      syncOutputControls('failure', typedError?.localMessage || genericOutputErrorMessage);
       return;
     }
     const bundle = await response.json();
@@ -270,7 +287,7 @@ function startOutputAction() {
   clearOutputMessages();
   return token;
 }
-function syncOutputControls(state = '') {
+function syncOutputControls(state = '', failureMessage = genericOutputErrorMessage) {
   const ready = hasFreshReadyOutput();
   outputControls.copyWechat.disabled = !ready;
   outputControls.downloadHtml.disabled = !ready;
@@ -278,7 +295,7 @@ function syncOutputControls(state = '') {
   outputControls.downloadMarkdown.disabled = false;
   clearOutputMessages();
   if (state === 'failure') {
-    outputControls.error.textContent = '未能生成富文本，仍可复制或下载 Markdown。';
+    outputControls.error.textContent = failureMessage;
     return;
   }
   if (outputPending) {
