@@ -122,11 +122,11 @@
 - failed target 在重渲染 DOM 中的顺序必须与请求数组一致；unknown、duplicate、乱序、非 `<img>`、静态占位或重复 DOM target 返回 400，不生成任何 output bundle。
 - 路由不读取浏览器发来的 HTML、diagnostics、blocked、主题 CSS、文件名或 MIME；出现这些额外键一律 400。
 
-服务端重启会改变 #6 的 target nonce。若打开页面持有旧 target，请求会收到 failed target 400；客户端必须把 render/output 标记 stale 并重新请求 `/api/typesetting/render`，不得删除 failed target 后静默重试。
+服务端重启会改变 #6 的 target nonce。`failedImageTargets` 为空时输出不绑定也不返回本次 renderer 新生成的 target，服务端重启后的请求仍可正常成功。只有数组非空且页面持有旧 target 时，请求才会收到 failed target 400；客户端必须把 render/output 标记 stale 并重新请求 `/api/typesetting/render`，不得删除 failed target 后静默重试。
 
 ## 严格 OutputBundle
 
-成功 HTTP 响应必须恰好包含七个顶层字段：
+成功 HTTP 响应必须恰好包含六个顶层字段：
 
 ```js
 {
@@ -138,7 +138,6 @@
     convertExternalLinksToFootnotes: boolean,
     failedImageTargets: string[]
   },
-  diagnostics: Diagnostic[],
   markdown: {
     mimeType: 'text/markdown;charset=utf-8',
     filename: string,
@@ -160,11 +159,11 @@
 
 - `schemaVersion` 固定为数字 `1`；未知版本必须整包拒绝。
 - `snapshot` 是服务端规范化后的输入回显，键和嵌套 shape 严格。`failedImageTargets` 使用重新渲染 DOM 顺序。客户端必须与当前 snapshot 逐字段比较，不能只比较正文或 revision。
-- `diagnostics` 复用 #6 的严格 schema。运行时坏图追加 `IMAGE_LOAD_FAILED/advisory`，target 为请求对应的 preview target；ID 在本 bundle 内唯一。`status === 'blocked'` 当且仅当 diagnostics 中存在 blocker。
+- OutputBundle 不返回 `diagnostics`、`blocked` 或 renderer 新生成的 target 字段；`snapshot.failedImageTargets` 只回显客户端已经提交且服务端验证过的数组。服务端只在模块内部校验四键 RenderResult，并直接用其 `blocked` 判别 `status`；格式检查 UI 继续只消费 `/api/typesetting/render` 的唯一 diagnostics，不建立第二套输出诊断。
 - `markdown` 在两种 status 下都必须存在。
 - `status === 'blocked'` 时 `clipboard === null` 且 `html === null`，服务端跳过 Juice。
-- `status === 'ready'` 时 `clipboard` 和 `html` 都必须为非 null，且 diagnostics 中没有 blocker。
-- 响应不返回独立 `blocked` boolean，避免它与判别字段分叉；客户端的富文本门禁仍使用当前四键 RenderResult 的 `renderBlocked === false`，并额外要求 bundle `status === 'ready'`。
+- `status === 'ready'` 时 `clipboard` 和 `html` 都必须为非 null；其判别依据是服务端本次内部 RenderResult 的 `blocked === false`。
+- 客户端的富文本门禁仍使用当前 `/render` 四键 RenderResult 的 `renderBlocked === false`，并额外要求 bundle `status === 'ready'`。两者不一致时拒绝 bundle，不从 output 响应重建 diagnostics。
 - 文件名必须等于服务端对同一标题生成的规范 basename 加 `.md` / `.html`。客户端不得自行重命名后又把 bundle 视为严格一致。
 
 ## 错误契约
@@ -185,9 +184,15 @@
 
 | HTTP | code | 条件 | retryable | 客户端行为 |
 | --- | --- | --- | --- | --- |
+| 403 | `OUTPUT_REQUEST_FORBIDDEN` | 非本机 Host、Origin 不匹配或非 `application/json` | `false` | 不发起生成或复制；显示请求环境/格式不受支持。 |
+| 405 | `OUTPUT_METHOD_NOT_ALLOWED` | 对同一路径使用非 POST 方法 | `false` | 视为客户端契约错误，不重试。 |
+| 400 | `OUTPUT_JSON_INVALID` | JSON 语法错误或请求体无法解析 | `false` | 当前 output stale；保留本地 Markdown artifact。 |
+| 413 | `OUTPUT_REQUEST_TOO_LARGE` | 请求超过现有 `express.json({ limit: '150kb' })` | `false` | 不重试富文本生成；提示缩短正文，保留当前源文稿。 |
 | 400 | `OUTPUT_REQUEST_INVALID` | shape、类型、主题、设置、布尔值、数组或额外键非法 | `false` | 当前 output stale；保留 Markdown 本地 fallback，显示输出数据无效。 |
-| 400 | `OUTPUT_FAILED_IMAGE_TARGET_INVALID` | failed target 重复、乱序、未知、非唯一、非受控 `<img>` 或 server restart 后失配 | `false` | render 与 output 同时 stale，重新请求 preview；不得静默丢弃 target。 |
+| 400 | `OUTPUT_FAILED_IMAGE_TARGET_INVALID` | failed target 重复、乱序、未知、非唯一、非受控 `<img>`，或非空数组在 server restart 后失配 | `false` | render 与 output 同时 stale，重新请求 preview；不得静默丢弃 target。 |
 | 500 | `OUTPUT_GENERATION_FAILED` | renderer 返回畸形结果、Juice 抛错、结构修正失败、白名单拒绝或最终 sanitizer 发生差异 | `true` | 不缓存部分响应；明确“未生成富文本”，保留复制/下载 Markdown。 |
+
+所有 `/api/typesetting/output` 非 2xx 都必须使用上述 exact error shape，包括在路由前发生的 Host/Origin/content-type guard、JSON parser 语法错误和 150kb body limit。`src/server.js` 先在现有通用 guard 中识别 exact output path：非 POST 先返回 typed 405；POST 再检查 Host/Origin/content-type 并返回 typed 403，避免 DELETE 等请求因缺 content-type 错报 403。JSON parser/final error middleware 对同一路径分别映射 parse failed、entity too large、域错误和意外错误；路由后保留同路径 method fallback 作为防御，保证请求不落入 HTML/通用 404。其他 endpoint 保持既有错误格式。
 
 错误消息不得包含堆栈、文件路径、原始 CSS parser 错误、HTML 或用户正文。错误响应不携带 markdown、clipboard 或 html 半成品。renderer 正常返回的 `EMPTY_BODY` / `RENDER_FAILED` 是 200 blocked bundle，不是 HTTP error；这保证 blocker 仍可拿到 Markdown。
 
@@ -235,7 +240,7 @@ createTypesettingOutputBuilder({
 
 - 每个匹配 `<img>` 原位替换为 `<figure role="note"><figcaption>图片加载失败。请检查图片地址后重试。` + 可选安全 alt + `</figcaption></figure>`；
 - alt 继续使用 #6 的折叠空白、最多 200 Unicode code point 规则；不回显 src；
-- 每项追加一条 `IMAGE_LOAD_FAILED/advisory`，不改变 blocked；
+- 不在 OutputBundle 追加或复制 `IMAGE_LOAD_FAILED`；#6 当前预览中的运行时 advisory 已经是格式检查 UI 的唯一事实。输出模块只把对应图片变成可见占位，不改变内部 RenderResult 的 blocked；
 - 静态 `format-image-placeholder` 已经由 renderer 生成，原样进入后续主题/内联步骤，不需要出现在 `failedImageTargets`；
 - 未列为 failed 的 HTTPS 图片按可复制图片处理。输出模块不发网络请求，也不等待图片加载。
 
@@ -285,14 +290,14 @@ Juice 输出先移除主题根及正文节点上的 class、id、残余 CSS vari
 
 ## 最终 HTML 安全白名单
 
-允许标签仅为当前 renderer 会产生且输出有意义的集合：
+允许标签必须精确覆盖当前 `public/typesetting.js` 的 `previewAllowedTags`，也就是当前 `sanitizeHtml.defaults.allowedTags` 加 `img`；不得另建更窄集合导致已通过 #6 严格预览校验的安全节点在输出阶段失败：
 
-`h1`～`h6`、`p`、`br`、`hr`、`blockquote`、`pre`、`code`、`ul`、`ol`、`li`、`strong`、`em`、`b`、`i`、`s`、`del`、`a`、`sup`、`sub`、`img`、`figure`、`figcaption`、`table`、`thead`、`tbody`、`tfoot`、`tr`、`th`、`td`、`caption`、`section`、`span`。
+`address`、`article`、`aside`、`footer`、`header`、`h1`、`h2`、`h3`、`h4`、`h5`、`h6`、`hgroup`、`main`、`nav`、`section`、`blockquote`、`dd`、`div`、`dl`、`dt`、`figcaption`、`figure`、`hr`、`li`、`menu`、`ol`、`p`、`pre`、`ul`、`a`、`abbr`、`b`、`bdi`、`bdo`、`br`、`cite`、`code`、`data`、`dfn`、`em`、`i`、`img`、`kbd`、`mark`、`q`、`rb`、`rp`、`rt`、`rtc`、`ruby`、`s`、`samp`、`small`、`span`、`strong`、`sub`、`sup`、`time`、`u`、`var`、`wbr`、`caption`、`col`、`colgroup`、`table`、`tbody`、`td`、`tfoot`、`th`、`thead`、`tr`。
 
 属性规则：
 
 - 所有允许标签最多有 `style`；未知属性直接使生成失败，不静默保留。
-- `a` 额外允许 `href`、`title`；协议只允许 `http`、`https`、`mailto`，拒绝凭据和协议相对 URL。
+- `a` 额外允许 `href`、`title`，并精确镜像 #6 `hasAllowedPreviewElement()` / `launder.naughtyHref` 的分类语义：先把用于分类的 href 移除 U+0000～U+0020 和 HTML comment；`/^[\\/]{2}/u` 匹配的任意两个斜线/反斜线组合视为协议相对并拒绝；若存在 `^[a-zA-Z][a-zA-Z0-9.\-+]*:` scheme，只允许大小写不敏感的 `http`、`https`、`mailto`；没有 scheme 的 relative URL 与 fragment 允许。该检查不要求 WHATWG `URL` 可解析，也不额外禁止 HTTP/HTTPS credentials；href 仍必须已经通过 renderer/sanitizer 的既有属性安全边界。
 - `img` 额外允许 `src`、`alt`、`referrerpolicy`；src 必须是无凭据绝对 HTTPS，referrerpolicy 必须为 `no-referrer`。
 - `th` / `td` 额外允许规范正整数 `colspan` / `rowspan`。
 - failed/static 占位可保留固定 `role="note"`；不保留 tabindex，因为下载/剪贴板产物不承担当前预览定位。
@@ -383,7 +388,19 @@ metadata header 固定包含四项：标题用 `<h1>`，作者、公众号名称
 4. 截取前 80 个 Unicode code point，再次去除结尾点/空格；
 5. 结果为空时使用 `未命名文章`。
 
-Markdown 文件名为 `${base}.md`，HTML 为 `${base}.html`。浏览器必须使用 bundle 提供的 filename；不得从当前输入重新计算，以免竞态下文件名和内容不一致。
+Markdown 文件名为 `${base}.md`，HTML 为 `${base}.html`。当客户端消费 fresh、snapshot 一致的 bundle 时，必须使用 bundle 提供的 filename，不得从当前输入重新计算，以免竞态下文件名和内容不一致。
+
+上一条只约束已经存在且 fresh、snapshot 一致的 bundle。没有 bundle、bundle stale、output 请求失败/等待中或当前 render 为 blocker 时，客户端允许从当前五个字段生成完整本地 Markdown artifact：
+
+```js
+{
+  mimeType: 'text/markdown;charset=utf-8',
+  filename: `${safeOutputBaseName(currentTitle)}.md`,
+  content: buildNormalizedMarkdown(currentDocument)
+}
+```
+
+客户端 `safeOutputBaseName()` 与 `buildNormalizedMarkdown()` 必须逐条实现同一算法，不得只生成 content 后沿用旧 bundle filename。服务端与客户端测试共同读取一份固定 fixture，覆盖 basename、front matter 和 LF，断言整个 `{ mimeType, filename, content }` 深度相等。
 
 ## 客户端状态与版本门禁
 
@@ -457,8 +474,7 @@ renderFresh
 
 - `window.isSecureContext === true`；
 - `navigator.clipboard?.write` 是函数；
-- `window.ClipboardItem` 存在；
-- 若 `ClipboardItem.supports` 存在，则 `text/html` 与 `text/plain` 都返回 true。
+- `typeof window.ClipboardItem === 'function'`；若 `window.ClipboardItem.supports` 是函数，则 `text/html` 与 `text/plain` 都必须返回 true。
 
 创建一个且仅一个：
 
@@ -479,13 +495,13 @@ new ClipboardItem({
 
 ### 复制 Markdown
 
-优先使用当前严格 bundle 的 `markdown.content`。若 bundle 不新鲜、请求失败或尚无成功 render，则按本规格相同算法从当前五个源字段在客户端生成规范 Markdown；客户端 helper 必须与服务端共享固定 fixture 测试，禁止另一套字段顺序或换行规则。使用 `navigator.clipboard.writeText(markdown)`；失败时继续提供“下载 Markdown”。
+存在 fresh 且 snapshot 一致的 ready/blocked bundle 时，可直接使用其完整 `markdown` artifact，不重算文件名。若没有 bundle、bundle stale、请求失败/等待中，或 UI 需要在 blocker 下立即提供 fallback，则按上一节从当前五个字段生成完整本地 artifact；客户端 helper 必须与服务端共享固定 fixture，禁止另一套 basename、字段顺序或换行规则。复制时使用 `navigator.clipboard.writeText(artifact.content)`；失败时继续提供“下载 Markdown”。
 
 ### 下载
 
 - HTML 只在富文本 gate 成立时使用 `bundle.html`。
-- Markdown 优先使用 bundle；任何 blocker/stale/服务端失败时可使用当前源字段本地生成的 fallback。
-- 客户端用当前 content 创建带 bundle mimeType 的 Blob，`URL.createObjectURL()`，创建临时 `<a download="filename">` 点击，并在同步 click 后 `setTimeout(..., 0)` revoke URL、移除节点。
+- Markdown 优先使用 fresh bundle 的完整 artifact；任何 blocker、无 bundle、stale、pending 或服务端失败时可使用当前源字段生成完整本地 artifact，并使用该 artifact 自己的 mimeType、filename、content。
+- 客户端用选定 artifact 的 content、mimeType、filename 创建 Blob 与临时 `<a download="filename">`；HTML artifact 只能来自 fresh bundle，Markdown artifact 可以来自 bundle 或本地 fallback。同步 click 后通过 `setTimeout(..., 0)` revoke URL、移除节点。
 - 下载不请求新的服务端文件、不写仓库/数据目录、不打开新标签页。创建 Blob 前再次比较 snapshot；失败时不下载旧内容。
 
 ## UI 布局与状态文案
@@ -505,21 +521,25 @@ new ClipboardItem({
 ### A. 深模块与严格 schema
 
 - 请求 exact keys：缺失、额外、错误类型、非法 presentation、非 boolean、failed target 非数组/空值/重复/乱序均 400。
+- 成功响应恰好六键且不含 `diagnostics` / `blocked` / renderer 新 target 字段；snapshot 只可回显已验证的 failed target 输入。ready/blocked 只由服务端内部四键 RenderResult 的 blocked 判别，客户端格式检查仍只消费 `/render` diagnostics。
 - 重新 renderer：输出与传入 preview DOM 无关；注入伪造 DOM、class、style 或 metadata 不会进入产物。
 - ready/blocked 判别：空正文和可控 renderer failure 返回 blocked + Markdown + null clipboard/html；conversion/advisory 返回 ready。
-- failed target：正常唯一图片可替换；未知、链接、静态占位、重复 DOM target 和 server restart nonce 失配拒绝。
+- failed target：正常唯一图片可替换；未知、链接、静态占位、重复 DOM target 和非空数组的 server restart nonce 失配拒绝；空数组跨 server restart 正常成功且响应不泄漏新 target。
 - factory seam：Juice throw、返回非字符串、后校验遇到非法 style/tag/attribute、sanitizer 差异均得到 `OUTPUT_GENERATION_FAILED`，不暴露半产物。
+- 真实 HTTP 分别覆盖 output path 的 Host/Origin/content-type guard 403、非 POST 405、malformed JSON 400、超过 150kb 的 413、域校验 400 和内部生成 500；所有非 2xx 都断言 exact typed error shape/code，不接受现有通用 `{ error: string }`。
 
 ### B. Markdown 与文件名
 
 - 四项元信息固定顺序；空值、引号、冒号、`#`、反斜线、中文、CRLF、多行值均为 JSON 双引号兼容 YAML。
-- body 只规范换行和最终 LF，不受主题、脚注、diagnostics 或 failed target 改写。
+- body 只规范换行和最终 LF，不受主题、脚注、#6 renderer diagnostics 或 failed target 改写。
 - 标题空白、全点、禁用字符、控制字符、emoji/CJK 和超过 80 code point 的文件名。
-- 服务端 bundle 与客户端 blocker fallback 对同一 fixture 字节相同。
+- 服务端 bundle 与客户端在 blocker/无 bundle/stale/pending/error 下生成的 artifact 共同读取一份 fixture，逐项深度断言 `{ mimeType, filename, content }` 相同；使用 fresh bundle 时断言不调用本地 basename 重算。
 
 ### C. CSS、结构和图片
 
 - 三个主题与四项设置都产生内联 style，不残留 `<style>`、class、CSS variable、媒体查询、字体文件或远程 CSS。
+- `previewAllowedTags` 的每个标签都能通过输出标签白名单，任一标签都不会因 #7 自建窄集合被拒绝；白名单外标签仍失败。
+- `a.href` 覆盖 http/https/mailto、relative、fragment、HTTP credentials、控制字符/HTML comment laundering、协议相对和未知 scheme，结果与 #6 `hasAllowedPreviewElement()` 一致；不把 WHATWG URL parse 作为链接准入条件。
 - 标题、段落、列表、引用、代码、分隔线、表格、链接、脚注、图片和两类占位通过最终白名单。
 - clipboard 的嵌套 ul/ol 在 Juice 后按 doocs 规则修正，同一 `li` 多个子列表也不反转；完整 HTML 保持 canonical 语义列表结构。
 - 数字和允许单位的图片尺寸正确转 style；危险/未知尺寸使整包失败；默认图片 `max-width:100%;height:auto`。
@@ -535,7 +555,7 @@ new ClipboardItem({
 ### E. 完整 HTML 与安全
 
 - 解析完整文档验证 doctype、lang、meta charset 首位、viewport、title、Referrer-Policy、CSP、四项 metadata 和同一正文。
-- 无 script、事件属性、form、iframe、外部 stylesheet、SVG、未知 scheme、凭据 URL、data/blob 图片、`url()` style。
+- 无 script、事件属性、form、iframe、外部 stylesheet、SVG、未知 scheme/协议相对链接、带凭据或非 HTTPS 图片、data/blob 图片、`url()` style；relative/fragment 和带 credentials 的 HTTP/HTTPS anchor 按 #6 语义保留。
 - 元信息和正文的 HTML 字符可见但不形成节点/属性注入。
 - HTML 下载 content、mimeType、filename 与 bundle 一致。
 
@@ -544,7 +564,7 @@ new ClipboardItem({
 - `ClipboardItem` 只创建一次，包含恰好 `text/html` / `text/plain`；`clipboard.write` 只调用一次。
 - write pending 时不提前报成功；resolve 才成功；reject、不支持、非 secure context 时不调用 `execCommand`/`writeText`，显示两个替代入口。
 - 四项元信息分别精确 `writeText`，不 trim、不拼 label；拒绝时不报成功。
-- Markdown `writeText` 和 HTML/Markdown Blob 下载均使用当前内容；URL 被 revoke，临时 anchor 被移除。
+- Markdown `writeText` 和 HTML/Markdown Blob 下载均使用当前 artifact；本地 fallback 的 filename/mime/content 来自当前字段而非旧 bundle，URL 被 revoke，临时 anchor 被移除。
 - blocker 禁止富文本和 HTML，仍能复制/下载 Markdown；advisory/conversion 不阻止。
 
 ### G. 版本与竞态
@@ -553,7 +573,7 @@ new ClipboardItem({
 - render stale/pending/畸形时即使旧 output ready 也不能复制。
 - output ready 后修改任一元信息立即失效，不能下载旧 metadata HTML/Markdown。
 - 图片 failure 到达后立即失效旧 bundle；新 bundle 含占位后恢复 gate。旧 DOM 图片事件不得改变当前 failed set。
-- 服务端重启导致 target 400 时强制重新 render，不静默删除坏图事实或复用旧 bundle。
+- 服务端重启且 failed target 非空导致 400 时强制重新 render，不静默删除坏图事实或复用旧 bundle；failed target 为空时不绑定 target epoch，输出正常接受。
 - 快速重复点击复制不能绕过当前 gate；每次成功都对应一次已 resolve 的 write。
 
 ### H. 回归和静态检查
@@ -568,7 +588,7 @@ new ClipboardItem({
 | 文件 | Issue #7 职责 |
 | --- | --- |
 | `src/typesetting-output.js` | 新增深模块、严格输入、renderer 复用、failed target 校验、Markdown、Juice、三个 doocs helper 适配、最终白名单、plain text、完整 HTML 和文件名。 |
-| `src/server.js` | 新增 `/api/typesetting/output`、builder 注入 seam、strict typed error 映射。 |
+| `src/server.js` | 新增 `/api/typesetting/output`、builder 注入 seam、method fallback，并让 Host/Origin/content-type guard、JSON parser、150kb limit、域错误和内部错误对该 endpoint 全部映射 strict typed error。 |
 | `public/typesetting.html` | 元信息独立复制按钮、最小输出区、状态/错误提示。 |
 | `public/typesetting.js` | output snapshot/version/cache、严格 bundle 校验、ClipboardItem/writeText、Blob 下载和 gate；不生成富文本 HTML。 |
 | `public/style.css` | 输出区、按钮状态、焦点与窄屏换行；不重排完整工作台。 |
@@ -577,6 +597,7 @@ new ClipboardItem({
 | `THIRD_PARTY_NOTICES.md` | 记录 doocs 三个函数、固定 SHA/许可/适配/偏离，以及 Juice 版本、SHA、MIT、Node 与 API 范围。 |
 | `test/typesetting-output.test.js` | 深模块、HTTP、schema、安全、Markdown、HTML、CSS、plain、failed target 和 failure seam。 |
 | `test/typesetting-output-ui.test.js` | Clipboard/Blob、UI、blocker/advisory、缓存失效和竞态浏览器验收。 |
+| `test/fixtures/typesetting-output-artifacts.json` | 服务端与客户端共同消费的 basename/front matter/LF fixture，期望值包含完整 Markdown artifact。 |
 | 既有 typesetting 测试 | 仅补必要回归断言，不搬迁或重写 #3～#6 测试。 |
 
 明确不修改 `src/article.js`、`src/exporter.js`、`public/app.js`、文章批量下载、文稿持久化 schema、四键 RenderResult、根 `CONTEXT.md` 或 ADR。
@@ -592,7 +613,7 @@ T2 服务端重新渲染、failed target、Markdown 与 blocked bundle
   ↓
 T3 Juice、doocs 三 helper、白名单、plain 与完整 HTML
   ↓
-T4 HTTP 严格接线与 typed error
+T4 HTTP 严格接线与 endpoint-scoped transport/domain typed error
   ↓
 T5 客户端 snapshot/version/cache 与严格响应校验
   ↓

@@ -31,8 +31,10 @@ Issue #5 与 #6 已经提供输出必须复用的事实：
 - `src/typesetting-render.js` 的生产 interface 只返回 `{ html, presentation, diagnostics, blocked }`，并对输入、最终 HTML、诊断和 target 建立严格契约。输出功能不应向该四键结果塞入 clipboard 或下载字段。
 - renderer 使用一次渲染内唯一的受控 `data-format-target`。图片 target 只有两类：可加载 HTTPS `<img>` 和静态占位；浏览器不得自行伪造静态分类。
 - `public/typesetting.js` 用 `previewVersion`、`appliedRenderVersion` 和 `renderFresh` 防止旧响应生效，并在图片真实加载失败时把同一 target 的 `<img>` 原位替换成占位，追加非阻断 `IMAGE_LOAD_FAILED`。
+- `public/typesetting.js` 已把允许标签固定为 `sanitizeHtml.defaults.allowedTags + img`，并对 anchor 使用 launder 风格 scheme 分类：拒绝协议相对和非 HTTP/HTTPS/mailto scheme，但允许 relative、fragment 以及不要求 WHATWG URL 可解析的既有安全 href。Issue #7 的最终输出检查应镜像这条边界，不能自建更窄标签/链接集合。
 - 当前主题由 `presentation.theme` 和四项严格枚举设置决定；主题 CSS 位于 `public/typesetting-theme.css`，不是用户可编辑 CSS。
 - 诊断 blocker 只表示内容不能生成富文本/完整 HTML；Markdown 源文件仍可导出。静态图片占位和运行时坏图都是 advisory，不应无理由阻止输出。
+- 格式检查 UI 已有 `/render` 的完整 diagnostics；OutputBundle 只需用内部 `blocked` 形成 ready/blocked 判别，不应再返回第二份 diagnostics 或新 target。只有非空 `failedImageTargets` 才需要绑定当前 target epoch，空集合不应因服务端重启失效。
 
 因此，Issue #7 必须新增独立的 `src/typesetting-output.js` 深模块，让它重新调用同一 renderer，并以请求中的运行时坏图 target 集合修正重新渲染出的受控图片。直接克隆 `#preview` 会同时绕过服务端 sanitizer、响应版本门禁和 target 所有权校验，不能采用。
 
