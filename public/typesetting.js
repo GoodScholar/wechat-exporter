@@ -90,15 +90,23 @@ function isPreviewTarget(target, detachedPreview) {
 function hasExactElementAttributes(element, names) {
   return element.attributes.length === names.length && names.every(name => element.hasAttribute(name));
 }
+function hrefForProtocolClassification(value) {
+  let href = value.replace(/[\u0000-\u0020]+/gu, '');
+  while (true) {
+    const start = href.indexOf('<!--');
+    if (start === -1) return href;
+    const end = href.indexOf('-->', start + 4);
+    if (end === -1) return href;
+    href = href.slice(0, start) + href.slice(end + 3);
+  }
+}
 function hasAllowedPreviewElement(element) {
   const tag = element.localName;
   if (!previewAllowedTags.has(tag)) return false;
   const allowedAttributes = previewAllowedAttributes[tag] || [];
   if ([...element.attributes].some(attribute => !allowedAttributes.includes(attribute.name))) return false;
   if (tag === 'a' && element.hasAttribute('href')) {
-    const rawHref = element.getAttribute('href');
-    if (/[\u0000-\u001f\u007f]/u.test(rawHref)) return false;
-    const href = rawHref.trim();
+    const href = hrefForProtocolClassification(element.getAttribute('href'));
     if (/^[\\/]{2}/u.test(href)) return false;
     try {
       if (!['http:', 'https:', 'mailto:'].includes(new URL(href, window.location.href).protocol)) return false;

@@ -359,6 +359,8 @@ test('客户端在应用前拒绝服务端 sanitizer 合同外标签属性且不
     ['LF-obfuscated javascript href', '<a href="jav\nascript:document.body.dataset.polluted=\'lf\'">LF 混淆</a>'],
     ['CR-obfuscated javascript href', '<a href="java\rscript:document.body.dataset.polluted=\'cr\'">CR 混淆</a>'],
     ['tab-obfuscated data href', '<a href="da\tta:text/html,unsafe">Data 混淆</a>'],
+    ['comment-obfuscated javascript href', '<a href="java<!--x-->script:document.body.dataset.polluted=\'comment\'">注释混淆</a>'],
+    ['comment-obfuscated data href', '<a href="da<!--x-->ta:text/html,unsafe">Data 注释混淆</a>'],
     ['protocol-relative anchor href', '<a href="//fixture.invalid/unsafe">协议相对链接</a>'],
     ['backslash protocol-relative href', '<a href="\\\\fixture.invalid/unsafe">反斜杠协议相对链接</a>'],
     ['mixed slash protocol-relative href', '<a href="/\\fixture.invalid/unsafe">混合斜杠协议相对链接</a>'],
@@ -410,6 +412,30 @@ test('客户端接受真实 renderer 的标题表格代码链接脚注特殊内�
   assert.equal(await page.locator('#preview a[href="/safe/path"]').count(), 1);
   assert.equal(await page.locator('#preview a[href="#section"]').count(), 1);
   assert.equal(await page.locator('#preview a:not([href])').count(), 1);
+});
+
+test('客户端接受真实 renderer 保留含控制字符的安全链接', async t => {
+  const { page, base } = await withBrowser(t);
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('外链转脚注').uncheck();
+  await page.getByLabel('Markdown 正文').fill([
+    '<a href="https://example.test/a\tb">安全 absolute</a>',
+    '<a href="/safe\tpath">安全 relative</a>',
+    '<a href="#sec\ttion">安全 fragment</a>',
+    '<a href="mailto:reader\t@example.test">安全 mailto</a>'
+  ].join(' '));
+  await waitForRenderState(page, 'current');
+
+  assert.equal(await page.locator('#render-status').getAttribute('data-blocked'), 'false');
+  assert.deepEqual(await page.locator('#preview a').evaluateAll(anchors => anchors.map(anchor => ({
+    text: anchor.textContent,
+    href: anchor.getAttribute('href')
+  }))), [
+    { text: '安全 absolute', href: 'https://example.test/a\tb' },
+    { text: '安全 relative', href: '/safe\tpath' },
+    { text: '安全 fragment', href: '#sec\ttion' },
+    { text: '安全 mailto', href: 'mailto:reader\t@example.test' }
+  ]);
 });
 
 test('本地 HTTPS 图片成功加载为 loaded 且请求不含 Referer', async t => {
