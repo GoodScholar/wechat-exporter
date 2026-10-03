@@ -116,6 +116,102 @@ test('文章导入替换内容但保留当前主题和全部非当前主题设�
   } finally { await server.close(); await rm(root, { recursive: true, force: true }); }
 });
 
+test('文章导入成功失败冲突和原子恢复均保留外链脚注开关', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-footnotes-'));
+  const dataDir = path.join(root, '.data');
+  const store = new TypesettingStore(dataDir);
+  let mode = 'success';
+  const fetchArticle = async () => {
+    if (mode === 'network') throw new Error('socket closed');
+    return articleHtml;
+  };
+  let server;
+  const assertFootnotesEnabled = async () => {
+    const visible = (await (await fetch(server.base + '/api/typesetting/document')).json()).document;
+    assert.equal(visible.convertExternalLinksToFootnotes, true);
+    assert.equal((await new TypesettingStore(dataDir).load()).convertExternalLinksToFootnotes, true);
+    return visible;
+  };
+  try {
+    const current = await store.save({
+      title: '原有标题', author: '原作者', account: '原公众号', publishedAt: '2026-09-01', body: '原有正文',
+      convertExternalLinksToFootnotes: true, revision: 1
+    });
+    server = await serve(createApp({ dataDir, interval: 0, typesettingStore: store, fetchArticle }));
+
+    const imported = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(imported.status, 200);
+    const document = (await imported.json()).document;
+    assert.deepEqual(Object.fromEntries(['title', 'author', 'account', 'publishedAt'].map(field => [field, document[field]])), {
+      title: '可导入文章', author: '测试作者', account: '测试公众号', publishedAt: '2026-09-19'
+    });
+    assert.match(document.body, /## 第一节/);
+    assert.equal(document.theme, current.theme);
+    assert.deepEqual(document.themeSettings, current.themeSettings);
+    assert.equal(document.convertExternalLinksToFootnotes, true);
+    assert.equal((await assertFootnotesEnabled()).revision, 2);
+
+    const unconfirmed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: false });
+    assert.equal(unconfirmed.status, 409);
+    assert.equal((await unconfirmed.json()).error.code, 'CONFIRM_REQUIRED');
+    await assertFootnotesEnabled();
+
+    mode = 'network';
+    const failed = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 2, confirmed: true });
+    assert.equal(failed.status, 502);
+    assert.equal((await failed.json()).error.code, 'NETWORK_READ');
+    await assertFootnotesEnabled();
+
+    const conflict = await post(server.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+    assert.equal(conflict.status, 409);
+    assert.equal((await conflict.json()).error.code, 'REVISION_CONFLICT');
+    await assertFootnotesEnabled();
+  } finally {
+    if (server) await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+
+  for (const phase of ['current-version', 'recovery-version', 'manifest']) {
+    const phaseRoot = await mkdtemp(path.join(os.tmpdir(), `wechat-typesetting-import-footnotes-${phase}-`));
+    const phaseDataDir = path.join(phaseRoot, '.data');
+    let failingPhase = '';
+    let candidateWrites = 0;
+    const writeAtomically = async (file, text) => {
+      if (failingPhase && file.includes('typesetting-versions')) {
+        candidateWrites++;
+        if ((phase === 'current-version' && candidateWrites === 1) || (phase === 'recovery-version' && candidateWrites === 2)) throw new Error('disk denied');
+      }
+      if (failingPhase === 'manifest' && file.endsWith('typesetting-document.manifest.json')) throw new Error('disk denied');
+      const temporary = `${file}.test`;
+      await writeFile(temporary, text, 'utf8');
+      await rename(temporary, file);
+    };
+    const phaseStore = new TypesettingStore(phaseDataDir, { writeAtomically });
+    let phaseServer;
+    try {
+      await phaseStore.save({
+        title: '旧标题', author: '', account: '', publishedAt: '', body: '旧正文',
+        convertExternalLinksToFootnotes: true, revision: 1
+      });
+      failingPhase = phase;
+      candidateWrites = 0;
+      phaseServer = await serve(createApp({ dataDir: phaseDataDir, interval: 0, typesettingStore: phaseStore, fetchArticle: async () => articleHtml }));
+      const response = await post(phaseServer.base, '/api/typesetting/import', { url: articleUrl, revision: 1, confirmed: true });
+      assert.equal(response.status, 500, phase);
+      assert.equal((await response.json()).error.code, 'PERSISTENCE_FAILED', phase);
+      const visible = (await (await fetch(phaseServer.base + '/api/typesetting/document')).json()).document;
+      assert.equal(visible.body, '旧正文', phase);
+      assert.equal(visible.convertExternalLinksToFootnotes, true, phase);
+      const recovered = await new TypesettingStore(phaseDataDir).load();
+      assert.equal(recovered.body, '旧正文', phase);
+      assert.equal(recovered.convertExternalLinksToFootnotes, true, phase);
+    } finally {
+      if (phaseServer) await phaseServer.close();
+      await rm(phaseRoot, { recursive: true, force: true });
+    }
+  }
+});
+
 test('任一版本候选或 manifest 提交失败时，旧文稿在内存和重启后仍是唯一可见状态', async () => {
   for (const phase of ['current-version', 'recovery-version', 'manifest']) {
     const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-import-persistence-'));
