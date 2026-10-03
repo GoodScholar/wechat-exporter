@@ -8,6 +8,9 @@ const outputRequestKeys = Object.freeze(['document', 'presentation', 'convertExt
 const outputDocumentKeys = Object.freeze(['title', 'author', 'account', 'publishedAt', 'body']);
 const renderResultKeys = Object.freeze(['html', 'presentation', 'diagnostics', 'blocked']);
 const themeSettingKeys = Object.freeze(['primaryColor', 'fontSize', 'lineHeight', 'blockSpacing']);
+const imageDiagnosticCodes = Object.freeze(['IMAGE_UNSUPPORTED_SCHEME', 'IMAGE_LOCAL_PATH', 'IMAGE_LOCAL_BINARY', 'IMAGE_MISSING_SOURCE']);
+const specialContentTypes = Object.freeze(['video', 'audio', 'embed', 'mini-program', 'poll']);
+const imageAttributeKeys = Object.freeze(['src', 'alt', 'referrerpolicy', 'data-image-state', 'data-format-target']);
 const controlledImageTarget = /^format-target-[a-f0-9]{24}-[1-9]\d*$/u;
 const fixedTypesettingThemeCss = readFileSync(new URL('../public/typesetting-theme.css', import.meta.url), 'utf8');
 const fixedJuiceOptions = Object.freeze({
@@ -30,10 +33,14 @@ const errorDefinitions = Object.freeze({
   OUTPUT_GENERATION_FAILED: Object.freeze({ message: '排版输出生成失败', status: 500, retryable: true })
 });
 
-const hasOwn = (value, key) => typeof value === 'object' && value !== null && Object.prototype.hasOwnProperty.call(value, key);
-const hasExactKeys = (value, keys) => typeof value === 'object' && value !== null && !Array.isArray(value)
-  && Object.keys(value).length === keys.length && keys.every(key => hasOwn(value, key));
+const hasOwn = (value, key) => Object.prototype.hasOwnProperty.call(value, key);
+const isPlainRecord = value => typeof value === 'object' && value !== null && !Array.isArray(value)
+  && Object.getPrototypeOf(value) === Object.prototype;
+const hasExactKeys = (value, keys) => isPlainRecord(value)
+  && Reflect.ownKeys(value).length === keys.length && keys.every(key => hasOwn(value, key));
 const normalizeLineEndings = value => value.replace(/\r\n?/gu, '\n');
+const isNonEmptyString = value => typeof value === 'string' && value.length > 0;
+const isPositiveInteger = value => Number.isSafeInteger(value) && value > 0;
 
 function outputError(code) {
   const definition = errorDefinitions[code];
@@ -64,18 +71,24 @@ function normalizeOutputRequest(value) {
     throw outputError('OUTPUT_FAILED_IMAGE_TARGET_INVALID');
   }
 
-  let presentation;
-  try {
-    presentation = normalizeTypesettingPresentation(value.presentation);
-  } catch {
-    throw outputError('OUTPUT_REQUEST_INVALID');
-  }
+  const presentation = normalizePresentation(value.presentation, 'OUTPUT_REQUEST_INVALID');
   return {
     document,
     presentation,
     convertExternalLinksToFootnotes: value.convertExternalLinksToFootnotes,
     failedImageTargets: [...value.failedImageTargets]
   };
+}
+
+function normalizePresentation(value, errorCode) {
+  if (!hasExactKeys(value, ['theme', 'settings']) || !hasExactKeys(value.settings, themeSettingKeys)) {
+    throw outputError(errorCode);
+  }
+  try {
+    return normalizeTypesettingPresentation(value);
+  } catch {
+    throw outputError(errorCode);
+  }
 }
 
 function samePresentation(left, right) {
@@ -87,23 +100,82 @@ function validateRenderResult(value, expectedPresentation) {
   if (!hasExactKeys(value, renderResultKeys)
     || typeof value.html !== 'string'
     || !Array.isArray(value.diagnostics)
-    || typeof value.blocked !== 'boolean'
-    || !value.diagnostics.every(item => typeof item === 'object' && item !== null && !Array.isArray(item)
-      && ['blocker', 'conversion', 'advisory'].includes(item.severity))) {
+    || typeof value.blocked !== 'boolean') {
     throw outputError('OUTPUT_GENERATION_FAILED');
   }
-
-  let presentation;
-  try {
-    presentation = normalizeTypesettingPresentation(value.presentation);
-  } catch {
-    throw outputError('OUTPUT_GENERATION_FAILED');
-  }
-  if (!samePresentation(presentation, expectedPresentation)
-    || value.blocked !== value.diagnostics.some(item => item.severity === 'blocker')) {
+  const presentation = normalizePresentation(value.presentation, 'OUTPUT_GENERATION_FAILED');
+  if (!samePresentation(presentation, expectedPresentation)) {
     throw outputError('OUTPUT_GENERATION_FAILED');
   }
   return { ...value, presentation };
+}
+
+function isSourceTarget(target, body) {
+  return hasExactKeys(target, ['kind', 'start', 'end']) && target.kind === 'source'
+    && Number.isSafeInteger(target.start) && target.start >= 0
+    && Number.isSafeInteger(target.end) && target.start <= target.end && target.end <= body.length;
+}
+
+function isPreviewTarget(target, $) {
+  if (!hasExactKeys(target, ['kind', 'id']) || target.kind !== 'preview' || !isNonEmptyString(target.id)) return false;
+  return $('[data-format-target]').toArray()
+    .filter(element => $(element).attr('data-format-target') === target.id).length === 1;
+}
+
+function hasValidTargets(diagnostic, body, $, kind, count) {
+  if (!Array.isArray(diagnostic.targets) || diagnostic.targets.length === 0) return false;
+  if (count !== undefined && diagnostic.targets.length !== count) return false;
+  if (!diagnostic.targets.every(target => kind === 'source' ? isSourceTarget(target, body) : isPreviewTarget(target, $))) return false;
+  const targetKeys = diagnostic.targets.map(target => target.kind === 'source'
+    ? `source:${target.start}:${target.end}`
+    : `preview:${target.id}`);
+  return new Set(targetKeys).size === targetKeys.length;
+}
+
+function isValidDiagnostic(diagnostic, body, $) {
+  if (!isPlainRecord(diagnostic) || !isNonEmptyString(diagnostic.id) || !isNonEmptyString(diagnostic.message)) return false;
+  const baseKeys = ['id', 'code', 'severity', 'message', 'targets'];
+  if (diagnostic.code === 'EMPTY_BODY') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && body.trim() === '' && hasValidTargets(diagnostic, body, $, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === 0;
+  }
+  if (diagnostic.code === 'RENDER_FAILED') {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'blocker'
+      && hasValidTargets(diagnostic, body, $, 'source', 1)
+      && diagnostic.targets[0].start === 0 && diagnostic.targets[0].end === body.length;
+  }
+  if (diagnostic.code === 'EXTERNAL_LINK_TO_FOOTNOTE') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, $, 'preview')
+      && hasExactKeys(diagnostic.meta, ['footnote', 'occurrences'])
+      && isPositiveInteger(diagnostic.meta.footnote) && diagnostic.meta.occurrences === diagnostic.targets.length;
+  }
+  if (diagnostic.code === 'SPECIAL_CONTENT_PLACEHOLDER') {
+    return hasExactKeys(diagnostic, [...baseKeys, 'meta']) && diagnostic.severity === 'conversion'
+      && hasValidTargets(diagnostic, body, $, 'preview', 1)
+      && hasExactKeys(diagnostic.meta, ['type']) && specialContentTypes.includes(diagnostic.meta.type);
+  }
+  if (imageDiagnosticCodes.includes(diagnostic.code)) {
+    return hasExactKeys(diagnostic, baseKeys) && diagnostic.severity === 'advisory'
+      && hasValidTargets(diagnostic, body, $, 'preview', 1);
+  }
+  return false;
+}
+
+function validateDiagnostics(diagnostics, body, $) {
+  if (diagnostics.some(diagnostic => !isValidDiagnostic(diagnostic, body, $))) {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
+  if (new Set(diagnostics.map(diagnostic => diagnostic.id)).size !== diagnostics.length) {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
+  const previewTargets = diagnostics.flatMap(diagnostic => diagnostic.targets
+    .filter(target => target.kind === 'preview')
+    .map(target => target.id));
+  if (new Set(previewTargets).size !== previewTargets.length) {
+    throw outputError('OUTPUT_GENERATION_FAILED');
+  }
 }
 
 function safeOutputBaseName(title) {
@@ -136,7 +208,10 @@ function normalizeImageAlt(value) {
 }
 
 function isControlledImage(image, target) {
-  if (!controlledImageTarget.test(target)
+  if (image.length !== 1
+    || Object.keys(image[0].attribs).length !== imageAttributeKeys.length
+    || !imageAttributeKeys.every(key => image.attr(key) !== undefined)
+    || !controlledImageTarget.test(target)
     || !image.is('img')
     || image.attr('data-format-target') !== target
     || image.attr('data-image-state') !== 'pending'
@@ -150,14 +225,17 @@ function isControlledImage(image, target) {
   }
 }
 
-function prepareRenderedHtml(html, failedImageTargets) {
+function parseRenderedHtml(html) {
   let $;
   try {
     $ = load(html, null, false);
   } catch {
     throw outputError('OUTPUT_GENERATION_FAILED');
   }
+  return $;
+}
 
+function prepareRenderedHtml($, failedImageTargets) {
   const indexedTargets = $('[data-format-target]').toArray().map((element, index) => ({
     element,
     index,
@@ -203,7 +281,7 @@ export function createTypesettingOutputBuilder({
 
     let rendered;
     try {
-      rendered = await renderTypesetting({
+      rendered = renderTypesetting({
         body: snapshot.document.body,
         presentation: snapshot.presentation,
         convertExternalLinksToFootnotes: snapshot.convertExternalLinksToFootnotes
@@ -211,8 +289,17 @@ export function createTypesettingOutputBuilder({
     } catch {
       throw outputError('OUTPUT_GENERATION_FAILED');
     }
+    if (rendered && typeof rendered.then === 'function') {
+      Promise.resolve(rendered).catch(() => {});
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
     const result = validateRenderResult(rendered, snapshot.presentation);
-    prepareRenderedHtml(result.html, snapshot.failedImageTargets);
+    const $ = parseRenderedHtml(result.html);
+    validateDiagnostics(result.diagnostics, snapshot.document.body, $);
+    if (result.blocked !== result.diagnostics.some(item => item.severity === 'blocker')) {
+      throw outputError('OUTPUT_GENERATION_FAILED');
+    }
+    prepareRenderedHtml($, snapshot.failedImageTargets);
 
     if (!result.blocked) throw outputError('OUTPUT_GENERATION_FAILED');
     return {

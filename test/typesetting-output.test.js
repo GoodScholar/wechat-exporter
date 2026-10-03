@@ -18,11 +18,17 @@ const outputRequest = (overrides = {}) => ({
   failedImageTargets: [],
   ...overrides
 });
-const blocker = () => ({ severity: 'blocker' });
-const blockedResult = (normalizedPresentation, html = '') => ({
+const blocker = (body = document.body) => ({
+  id: 'diagnostic-blocker',
+  code: body.trim() ? 'RENDER_FAILED' : 'EMPTY_BODY',
+  severity: 'blocker',
+  message: body.trim() ? '正文渲染失败，请检查内容后重试。' : '正文为空，请输入需要排版的内容。',
+  targets: [{ kind: 'source', start: 0, end: body.trim() ? body.length : 0 }]
+});
+const blockedResult = (normalizedPresentation, html = '', body = document.body) => ({
   html,
   presentation: normalizedPresentation,
-  diagnostics: [blocker()],
+  diagnostics: [blocker(body)],
   blocked: true
 });
 
@@ -44,6 +50,16 @@ async function assertOutputError(operation, code) {
     assert.doesNotMatch(String(error.message), /sentinel|\/Users\/private|secret\.example/iu);
     return true;
   });
+}
+
+function withCustomPrototype(value) {
+  return Object.assign(Object.create({ inherited: true }), value);
+}
+
+function withHiddenExtra(value) {
+  const copy = { ...value };
+  Object.defineProperty(copy, 'hidden', { value: true });
+  return copy;
 }
 
 test('输出依赖和共享 Markdown fixture 固定版本与完整 artifact shape', async () => {
@@ -82,7 +98,7 @@ test('输出 builder 只接受 exact 四键请求和 exact 五键 document', asy
   const build = createTypesettingOutputBuilder({
     renderTypesetting(input) {
       renderCalls.push(input);
-      return blockedResult(input.presentation);
+      return blockedResult(input.presentation, '', input.body);
     },
     inlineCss() {
       throw new Error('blocked 不应调用 inlineCss');
@@ -130,7 +146,7 @@ test('服务端 Markdown artifact 与共享 fixture 逐字节一致', async () =
   const fixtures = await readJson('./fixtures/typesetting-output-artifacts.json');
   const build = createTypesettingOutputBuilder({
     renderTypesetting(input) {
-      return blockedResult(input.presentation);
+      return blockedResult(input.presentation, '', input.body);
     },
     inlineCss() {
       throw new Error('blocked 不应调用 inlineCss');
@@ -151,7 +167,7 @@ test('blocked bundle 恰好六键并跳过 Juice', async () => {
   const build = createTypesettingOutputBuilder({
     renderTypesetting(input) {
       renderCalls.push(input);
-      return blockedResult(input.presentation, '<p>阻断正文不会进入输出</p>');
+      return blockedResult(input.presentation, '<p>阻断正文不会进入输出</p>', input.body);
     },
     inlineCss() {
       inlineCalls += 1;
@@ -217,6 +233,102 @@ test('输出 builder 拒绝畸形四键 RenderResult 且不泄漏内部错误', 
   await assertOutputError(throwingBuild(outputRequest()), 'OUTPUT_GENERATION_FAILED');
 });
 
+test('输出 builder 要求 exact record 为普通对象且拒绝异步 renderer', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const ordinaryBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => blockedResult(input.presentation, '', input.body),
+    inlineCss: () => 'unexpected',
+    themeCss: 'fixed theme css'
+  });
+  const valid = outputRequest();
+
+  await assertOutputError(ordinaryBuild(withCustomPrototype(valid)), 'OUTPUT_REQUEST_INVALID');
+  await assertOutputError(ordinaryBuild(withHiddenExtra(valid)), 'OUTPUT_REQUEST_INVALID');
+  await assertOutputError(ordinaryBuild({ ...valid, document: withCustomPrototype(document) }), 'OUTPUT_REQUEST_INVALID');
+  await assertOutputError(ordinaryBuild({ ...valid, document: withHiddenExtra(document) }), 'OUTPUT_REQUEST_INVALID');
+
+  for (const result of [withCustomPrototype(blockedResult(presentation)), withHiddenExtra(blockedResult(presentation))]) {
+    const build = createTypesettingOutputBuilder({
+      renderTypesetting: () => result,
+      inlineCss: () => 'unexpected',
+      themeCss: 'fixed theme css'
+    });
+    await assertOutputError(build(valid), 'OUTPUT_GENERATION_FAILED');
+  }
+
+  const asyncBuild = createTypesettingOutputBuilder({
+    renderTypesetting: input => Promise.resolve(blockedResult(input.presentation, '', input.body)),
+    inlineCss: () => 'unexpected',
+    themeCss: 'fixed theme css'
+  });
+  await assertOutputError(asyncBuild(valid), 'OUTPUT_GENERATION_FAILED');
+});
+
+test('输出 builder 按 #6 判别联合严格校验 diagnostics', async () => {
+  const { createTypesettingOutputBuilder } = await loadOutputModule();
+  const body = '严格诊断';
+  const previewOne = 'diagnostic-preview-one';
+  const previewTwo = 'diagnostic-preview-two';
+  const previewSpecial = 'diagnostic-preview-special';
+  const previewImage = 'diagnostic-preview-image';
+  const html = [
+    `<a href="https://example.com/one" data-format-target="${previewOne}">一<sup>[1]</sup></a>`,
+    `<a href="https://example.com/two" data-format-target="${previewTwo}">二<sup>[1]</sup></a>`,
+    `<blockquote class="format-special-placeholder" data-format-target="${previewSpecial}" tabindex="0" role="note">特殊内容</blockquote>`,
+    `<figure class="format-image-placeholder" data-format-target="${previewImage}" tabindex="0" role="note">图片占位</figure>`
+  ].join('');
+  const footnote = {
+    id: 'diagnostic-footnote', code: 'EXTERNAL_LINK_TO_FOOTNOTE', severity: 'conversion', message: '已将外部链接转换为脚注。',
+    targets: [{ kind: 'preview', id: previewOne }, { kind: 'preview', id: previewTwo }],
+    meta: { footnote: 1, occurrences: 2 }
+  };
+  const special = {
+    id: 'diagnostic-special', code: 'SPECIAL_CONTENT_PLACEHOLDER', severity: 'conversion', message: '已将特殊内容保留为可见占位。',
+    targets: [{ kind: 'preview', id: previewSpecial }], meta: { type: 'video' }
+  };
+  const image = {
+    id: 'diagnostic-image', code: 'IMAGE_MISSING_SOURCE', severity: 'advisory', message: '图片缺少来源。',
+    targets: [{ kind: 'preview', id: previewImage }]
+  };
+  const validDiagnostics = [blocker(body), footnote, special, image];
+  const validResult = { html, presentation, diagnostics: validDiagnostics, blocked: true };
+  const buildFor = result => createTypesettingOutputBuilder({
+    renderTypesetting: () => result,
+    inlineCss: () => 'unexpected',
+    themeCss: 'fixed theme css'
+  });
+
+  assert.equal((await buildFor(validResult)(outputRequest({ document: { ...document, body } }))).status, 'blocked');
+
+  const sourceTarget = blocker(body).targets[0];
+  const malformedDiagnostics = [
+    [{ severity: 'blocker' }],
+    [{ ...blocker(body), extra: true }],
+    [withCustomPrototype(blocker(body))],
+    [withHiddenExtra(blocker(body))],
+    [{ ...blocker(body), targets: [{ ...sourceTarget, extra: true }] }],
+    [{ ...blocker(body), targets: [withCustomPrototype(sourceTarget)] }],
+    [{ ...blocker(body), targets: [withHiddenExtra(sourceTarget)] }],
+    [{ ...blocker(body), targets: [{ kind: 'source', start: 0, end: body.length + 1 }] }],
+    [{ ...image, targets: [{ kind: 'preview', id: 'absent' }] }, blocker(body)],
+    [{ ...image, targets: [{ kind: 'preview', id: '' }] }, blocker(body)],
+    [{ ...footnote, meta: { footnote: 0, occurrences: 2 } }, blocker(body), special, image],
+    [{ ...footnote, meta: { footnote: 1, occurrences: 1 } }, blocker(body), special, image],
+    [{ ...footnote, meta: { ...footnote.meta, extra: true } }, blocker(body), special, image],
+    [{ ...footnote, meta: withCustomPrototype(footnote.meta) }, blocker(body), special, image],
+    [{ ...footnote, meta: withHiddenExtra(footnote.meta) }, blocker(body), special, image],
+    [{ ...special, meta: { type: 'unknown' } }, blocker(body), footnote, image],
+    [{ ...image, severity: 'conversion' }, blocker(body), footnote, special],
+    [{ ...image, code: 'IMAGE_LOAD_FAILED' }, blocker(body), footnote, special],
+    [blocker(body), { ...blocker(body) }],
+    [blocker(body), image, { ...special, targets: [{ kind: 'preview', id: previewImage }] }]
+  ];
+
+  for (const diagnostics of malformedDiagnostics) {
+    await assertOutputError(buildFor({ ...validResult, diagnostics })(outputRequest({ document: { ...document, body } })), 'OUTPUT_GENERATION_FAILED');
+  }
+});
+
 test('failed target 仅接受当前唯一受控 HTTPS 图片并按 DOM 顺序回显', async () => {
   const { createTypesettingOutputBuilder } = await loadOutputModule();
   const first = 'format-target-aaaaaaaaaaaaaaaaaaaaaaaa-1';
@@ -228,7 +340,7 @@ test('failed target 仅接受当前唯一受控 HTTPS 图片并按 DOM 顺序回
         `<img src="https://images.example/first.png" alt="第一张" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${first}">`,
         '<p>中间正文</p>',
         `<img src="https://images.example/second.png" alt="第二张" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${second}">`
-      ].join(''));
+      ].join(''), input.body);
     },
     inlineCss() {
       inlineCalls += 1;
@@ -259,12 +371,17 @@ test('failed target 拒绝未知链接静态占位重复 DOM target 乱序与旧
     ['带凭据图片', image(first, 'https://reader:secret@images.example/image.png'), [first]],
     ['错误 referrer policy', image(first).replace('no-referrer', 'origin'), [first]],
     ['缺少 pending 状态', image(first).replace(' data-image-state="pending"', ''), [first]],
+    ['非规范 runtime 状态', image(first).replace('pending', 'loaded'), [first]],
+    ['缺少 alt', image(first).replace(' alt="图片"', ''), [first]],
+    ['额外 onerror', image(first, 'https://images.example/image.png', 'onerror="evil()"'), [first]],
+    ['额外 class', image(first, 'https://images.example/image.png', 'class="unexpected"'), [first]],
+    ['额外 data 属性', image(first, 'https://images.example/image.png', 'data-extra="unexpected"'), [first]],
     ['不受控 target 形状', image('format-target-short-1'), ['format-target-short-1']]
   ];
 
   for (const [label, html, failedImageTargets] of cases) {
     const build = createTypesettingOutputBuilder({
-      renderTypesetting: input => blockedResult(input.presentation, html),
+      renderTypesetting: input => blockedResult(input.presentation, html, input.body),
       inlineCss: () => 'unexpected',
       themeCss: 'fixed theme css'
     });
@@ -282,7 +399,7 @@ test('空 failed target 跨 renderer nonce 正常且 bundle 不泄漏新 target'
 
   for (const target of targets) {
     const build = createTypesettingOutputBuilder({
-      renderTypesetting: input => blockedResult(input.presentation, `<img src="https://images.example/image.png" alt="图片" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`),
+      renderTypesetting: input => blockedResult(input.presentation, `<img src="https://images.example/image.png" alt="图片" referrerpolicy="no-referrer" data-image-state="pending" data-format-target="${target}">`, input.body),
       inlineCss: () => 'unexpected',
       themeCss: 'fixed theme css'
     });
