@@ -32,6 +32,7 @@ const blockPlainTextTags = new Set([
   'address', 'article', 'aside', 'footer', 'header', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'hgroup', 'main', 'nav', 'section',
   'blockquote', 'dd', 'div', 'dl', 'dt', 'figcaption', 'figure', 'p'
 ]);
+const listPlainTextTags = new Set(['menu', 'ol', 'ul']);
 const structuralWhitespaceParents = new Set([
   ...blockPlainTextTags, 'body', 'table', 'tbody', 'tfoot', 'thead', 'tr'
 ]);
@@ -638,7 +639,7 @@ function createEmptyNode() {
 function isPlainTextBlockNode(node) {
   if (node?.type !== 'tag') return false;
   const tagName = node.tagName.toLowerCase();
-  return blockPlainTextTags.has(tagName) || tagName === 'ul' || tagName === 'ol' || tagName === 'table' || tagName === 'pre';
+  return blockPlainTextTags.has(tagName) || listPlainTextTags.has(tagName) || tagName === 'table' || tagName === 'pre';
 }
 
 function renderInlinePlainText($, nodes, depth) {
@@ -659,12 +660,12 @@ function renderListPlainText($, list, depth) {
     if (child.type === 'text') continue;
     if (child.type !== 'tag') continue;
     if (child.tagName === 'li') {
-      const inlineNodes = $(child).contents().toArray().filter(node => node.type !== 'tag' || (node.tagName !== 'ul' && node.tagName !== 'ol'));
+      const inlineNodes = $(child).contents().toArray().filter(node => node.type !== 'tag' || !listPlainTextTags.has(node.tagName));
       const text = renderInlinePlainText($, inlineNodes, depth).replace(/\s+/gu, ' ').trim();
       output += `${'  '.repeat(depth)}${ordered ? `${number}. ` : '- '}${text}\n`;
       number += 1;
-      for (const nested of $(child).children('ul, ol').toArray()) output += renderListPlainText($, nested, depth + 1);
-    } else if (child.tagName === 'ul' || child.tagName === 'ol') {
+      for (const nested of $(child).children('menu, ol, ul').toArray()) output += renderListPlainText($, nested, depth + 1);
+    } else if (listPlainTextTags.has(child.tagName)) {
       output += renderListPlainText($, child, depth + 1);
     }
   }
@@ -673,6 +674,10 @@ function renderListPlainText($, list, depth) {
 
 function renderTablePlainText($, table, depth) {
   let output = '';
+  for (const caption of $(table).children('caption').toArray()) {
+    const content = renderPlainTextNode($, caption, depth);
+    output += content && !content.endsWith('\n') ? `${content}\n` : content;
+  }
   for (const row of $(table).find('tr').toArray()) {
     const cells = $(row).children('th, td').toArray().map(cell => renderInlinePlainText($, $(cell).contents().toArray(), depth)
       .replace(/\s+/gu, ' ').trim());
@@ -727,7 +732,7 @@ function renderPlainTextNode($, node, depth = 0) {
   }
   if (tagName === 'pre') return `${$(node).text()}\n`;
   if (tagName === 'code') return $(node).text();
-  if (tagName === 'ul' || tagName === 'ol') return renderListPlainText($, node, depth);
+  if (listPlainTextTags.has(tagName)) return renderListPlainText($, node, depth);
   if (tagName === 'table') return renderTablePlainText($, node, depth);
   const content = renderInlinePlainText($, $(node).contents().toArray(), depth);
   return blockPlainTextTags.has(tagName) ? `${content}\n` : content;

@@ -1017,6 +1017,48 @@ test('plain text 忽略真实块容器 DOM 缩进且保留 inline code 与行内
   assert.doesNotMatch(plain, /(^|\n) /u);
 });
 
+test('生产 builder 将 menu 及混合嵌套 menu ul ol 输出为有层级的无序列表', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const cases = [
+    {
+      body: '<menu><li>甲</li><li>乙</li></menu>',
+      expected: ['- 甲', '- 乙'].join('\n')
+    },
+    {
+      body: [
+        '<menu>',
+        '  <li>甲',
+        '    <menu><li>乙</li><li>丙<ol><li>丁</li></ol></li></menu>',
+        '    <ul><li>戊</li></ul>',
+        '    <ol><li>己</li></ol>',
+        '  </li>',
+        '  <li>庚</li>',
+        '</menu>'
+      ].join('\n'),
+      expected: ['- 甲', '  - 乙', '  - 丙', '    1. 丁', '  - 戊', '  1. 己', '- 庚'].join('\n')
+    }
+  ];
+
+  for (const { body, expected } of cases) {
+    const bundle = await buildTypesettingOutput(outputRequest({ document: { ...document, body } }));
+    assert.equal(bundle.status, 'ready');
+    assert.equal(bundle.clipboard.plain.content, expected);
+  }
+});
+
+test('生产 builder 在 table tab 行前保留一次 caption 的 inline br 与空白语义', async () => {
+  const { buildTypesettingOutput } = await loadOutputModule();
+  const bundle = await buildTypesettingOutput(outputRequest({
+    document: {
+      ...document,
+      body: '<table><caption>季度   <strong>汇总</strong><br>第二   行</caption><tbody><tr><th>项目</th><th>数量</th></tr><tr><td>甲</td><td>2</td></tr></tbody></table>'
+    }
+  }));
+
+  assert.equal(bundle.status, 'ready');
+  assert.equal(bundle.clipboard.plain.content, ['季度 汇总', '第二 行', '项目\t数量', '甲\t2'].join('\n'));
+});
+
 test('plain text 将块容器中行内语义兄弟间的换行空白保留为单个空格', async () => {
   const { buildTypesettingOutput } = await loadOutputModule();
   const bundle = await buildTypesettingOutput(outputRequest({
