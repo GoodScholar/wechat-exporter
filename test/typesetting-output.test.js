@@ -1193,3 +1193,126 @@ test('transport typed error 覆盖 output guard method parser limit 并与其他
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test('transport typed error 将合法 JSON 标量交给 builder 并安全归类客户端解码错误', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-output-parser-'));
+  const received = [];
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'),
+    interval: 0,
+    typesettingOutputBuilder(value) {
+      received.push(value);
+      const error = new Error('builder request invalid sentinel /Users/private/source.md');
+      error.code = 'OUTPUT_REQUEST_INVALID';
+      throw error;
+    }
+  }));
+  const endpoint = `${server.base}/api/typesetting/output`;
+
+  try {
+    const scalars = ['字符串', 42, true, false, null, []];
+    for (const value of scalars) {
+      await assertTypedOutputResponse(await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(value)
+      }), 'OUTPUT_REQUEST_INVALID');
+    }
+    assert.deepEqual(received, scalars);
+
+    const parserFailures = [
+      { headers: { 'Content-Type': 'application/json; charset=us-ascii' }, body: '{}' },
+      { headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'compress' }, body: '{}' },
+      { headers: { 'Content-Type': 'application/json', 'Content-Encoding': 'gzip' }, body: Buffer.from('not-a-gzip-stream') }
+    ];
+    for (const init of parserFailures) {
+      await assertTypedOutputResponse(await fetch(endpoint, { method: 'POST', ...init }), 'OUTPUT_JSON_INVALID');
+    }
+    assert.equal(received.length, scalars.length);
+
+    const existingStrictParser = await fetch(`${server.base}/api/typesetting/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify('合法 JSON 标量')
+    });
+    assert.equal(existingStrictParser.status, 400);
+    const existingError = await existingStrictParser.json();
+    assert.deepEqual(Object.keys(existingError), ['error']);
+    assert.equal(typeof existingError.error, 'string');
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test('transport typed error 仅接受严格本机 Host authority 并继续匹配 Origin', async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), 'wechat-typesetting-output-host-'));
+  let calls = 0;
+  const bundle = {
+    schemaVersion: 1,
+    status: 'blocked',
+    snapshot: {},
+    markdown: { mimeType: 'text/markdown;charset=utf-8', filename: 'host.md', content: 'host' },
+    clipboard: null,
+    html: null
+  };
+  const server = await serve(createApp({
+    dataDir: path.join(root, '.data'),
+    interval: 0,
+    typesettingOutputBuilder() {
+      calls += 1;
+      return bundle;
+    }
+  }));
+  const endpoint = `${server.base}/api/typesetting/output`;
+
+  try {
+    const allowedHosts = ['localhost', 'localhost:0', 'localhost:65535', '127.0.0.1', '127.0.0.1:4318', '[::1]', '[::1]:65535'];
+    for (const host of allowedHosts) {
+      const response = await rawHttpResponse(endpoint, {
+        method: 'POST',
+        headers: { Host: host, 'Content-Type': 'application/json' },
+        body: '{}'
+      });
+      assert.equal(response.status, 200, host);
+      assert.deepEqual(await response.json(), bundle);
+    }
+
+    const matchedOrigin = await rawHttpResponse(endpoint, {
+      method: 'POST',
+      headers: { Host: 'localhost:4318', Origin: 'http://localhost:4318', 'Content-Type': 'application/json' },
+      body: '{}'
+    });
+    assert.equal(matchedOrigin.status, 200);
+
+    const invalidHosts = [
+      'localhost.evil.example',
+      '127.0.0.1.evil.example',
+      '[::1].evil.example',
+      'localhost:4318:evil',
+      '127.0.0.1:not-a-port',
+      '[::1]:65536',
+      'localhost:65536',
+      'localhost:-1',
+      'localhost:',
+      'localhost@evil.example'
+    ];
+    for (const host of invalidHosts) {
+      await assertTypedOutputResponse(await rawHttpResponse(endpoint, {
+        method: 'POST',
+        headers: { Host: host, 'Content-Type': 'application/json' },
+        body: '{}'
+      }), 'OUTPUT_REQUEST_FORBIDDEN');
+    }
+
+    await assertTypedOutputResponse(await rawHttpResponse(endpoint, {
+      method: 'POST',
+      headers: { Host: 'localhost:4318', Origin: 'http://localhost:4319', 'Content-Type': 'application/json' },
+      body: '{}'
+    }), 'OUTPUT_REQUEST_FORBIDDEN');
+    assert.equal(calls, allowedHosts.length + 1);
+  } finally {
+    await server.close();
+    await rm(root, { recursive: true, force: true });
+  }
+});

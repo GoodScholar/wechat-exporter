@@ -33,6 +33,8 @@ const typesettingOutputErrors = Object.freeze({
   OUTPUT_FAILED_IMAGE_TARGET_INVALID: Object.freeze({ status: 400, message: '失败图片目标无效', retryable: false }),
   OUTPUT_GENERATION_FAILED: Object.freeze({ status: 500, message: '排版输出生成失败', retryable: true })
 });
+const typesettingOutputJsonParser = express.json({ limit: '150kb', strict: false });
+const typesettingOutputParserErrors = new WeakSet();
 const typesettingRenderKeys = Object.freeze(['body', 'theme', 'settings', 'convertExternalLinksToFootnotes']);
 const hasExactKeys = (value, keys) => typeof value === 'object' && value !== null && !Array.isArray(value)
   && Object.keys(value).length === keys.length && keys.every(key => Object.prototype.hasOwnProperty.call(value, key));
@@ -76,6 +78,13 @@ function sendTypesettingOutputError(res, code) {
   });
 }
 
+function hasAllowedTypesettingOutputHost(authority) {
+  if (typeof authority !== 'string') return false;
+  const match = /^(?:localhost|127\.0\.0\.1)(?::([0-9]{1,5}))?$/iu.exec(authority)
+    || /^\[::1\](?::([0-9]{1,5}))?$/iu.exec(authority);
+  return Boolean(match) && (match[1] === undefined || Number(match[1]) <= 65535);
+}
+
 export function createApp({ dataDir = path.join(root, '.data'), exporter, interval, openDirectory = openWithSystem, typesettingStore, fetchArticle, typesettingRenderer = renderTypesettingMarkdown, typesettingOutputBuilder = buildTypesettingOutput } = {}) {
   const app = express();
   const verification = createVerificationBrowser(dataDir);
@@ -94,7 +103,7 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.use((req, res, next) => {
     if (req.path === typesettingOutputPath) {
       if (req.method !== 'POST') return sendTypesettingOutputError(res, 'OUTPUT_METHOD_NOT_ALLOWED');
-      if (!['localhost', '127.0.0.1', '[::1]'].includes(req.hostname)
+      if (!hasAllowedTypesettingOutputHost(req.headers.host)
         || req.headers.origin && req.headers.origin !== `http://${req.headers.host}`
         || !req.is('application/json')) return sendTypesettingOutputError(res, 'OUTPUT_REQUEST_FORBIDDEN');
     } else {
@@ -103,6 +112,12 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
     }
     res.set({ 'X-Content-Type-Options': 'nosniff', 'Referrer-Policy': 'no-referrer', 'Content-Security-Policy': contentSecurityPolicy });
     next();
+  });
+  app.use(typesettingOutputRoute, (req, res, next) => {
+    typesettingOutputJsonParser(req, res, error => {
+      if (error && (typeof error === 'object' || typeof error === 'function')) typesettingOutputParserErrors.add(error);
+      next(error);
+    });
   });
   app.use(express.json({ limit: '150kb' }));
   app.get('/api/typesetting/document', async (req, res) => res.json({ document: await typesetting.load() }));
@@ -194,8 +209,11 @@ export function createApp({ dataDir = path.join(root, '.data'), exporter, interv
   app.use((error, req, res, next) => {
     if (res.headersSent) return next(error);
     if (req.path === typesettingOutputPath) {
-      if (error?.type === 'entity.too.large') return sendTypesettingOutputError(res, 'OUTPUT_REQUEST_TOO_LARGE');
-      if (error?.type === 'entity.parse.failed') return sendTypesettingOutputError(res, 'OUTPUT_JSON_INVALID');
+      if (error && (typeof error === 'object' || typeof error === 'function') && typesettingOutputParserErrors.has(error)) {
+        if (error.type === 'entity.too.large') return sendTypesettingOutputError(res, 'OUTPUT_REQUEST_TOO_LARGE');
+        if (error.status >= 400 && error.status < 500) return sendTypesettingOutputError(res, 'OUTPUT_JSON_INVALID');
+        return sendTypesettingOutputError(res, 'OUTPUT_GENERATION_FAILED');
+      }
       if (error?.code === 'OUTPUT_REQUEST_INVALID' || error?.code === 'OUTPUT_FAILED_IMAGE_TARGET_INVALID' || error?.code === 'OUTPUT_GENERATION_FAILED') {
         return sendTypesettingOutputError(res, error.code);
       }
