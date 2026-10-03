@@ -485,7 +485,8 @@ function insertTextAtSelection(text, snapshot, removed = []) {
     fields.body.focus();
     fields.body.setSelectionRange(snapshot.start, snapshot.end);
     inserted = document.execCommand('insertText', false, text);
-  } finally { controlledBodyInsertion = false; }
+  } catch { inserted = false; }
+  finally { controlledBodyInsertion = false; }
   if (!inserted || fields.body.value !== expectedBody) {
     fields.body.value = snapshot.body;
     documentModel.body = snapshot.body;

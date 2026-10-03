@@ -117,6 +117,16 @@ async function dispatchHtmlPaste(page, html) {
   }, html);
 }
 
+async function dispatchImageFilePaste(page) {
+  return page.evaluate(() => {
+    const clipboard = new DataTransfer();
+    clipboard.items.add(new File(['binary-is-never-read'], 'paste.png', { type: 'image/png' }));
+    const event = new ClipboardEvent('paste', { bubbles: true, cancelable: true, clipboardData: clipboard });
+    document.querySelector('#document-body').dispatchEvent(event);
+    return event.defaultPrevented;
+  });
+}
+
 function richResult(overrides = {}) {
   return {
     markdown: '插入😀内容',
@@ -865,4 +875,130 @@ test('客户端拒绝额外键重复 removed 未知 downgrade 和不安全 sourc
     assert.equal(await page.getByLabel('Markdown 正文').inputValue(), before);
     assert.equal(await page.locator('#format-checks').innerHTML(), beforeChecks);
   }
+});
+
+test('富文本 execCommand 破坏正文后抛错会完整回滚且保留旧审计和异步状态', async t => {
+  const { page, base } = await withBrowser(t);
+  const pageErrors = [];
+  const renderRequests = [];
+  const savePayloads = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderRequests.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }) });
+  });
+  await page.route('**/api/typesetting/document', async route => {
+    if (route.request().method() === 'POST') savePayloads.push(route.request().postDataJSON());
+    await route.continue();
+  });
+  let payload = richResult({ markdown: '建立旧审计', removed: ['script'], downgraded: [], block: false });
+  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(payload) }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('甲乙');
+  await page.evaluate(() => { window.confirm = () => true; const body = document.querySelector('#document-body'); body.setSelectionRange(1, 1); });
+  await dispatchHtmlPaste(page, '<p>建立旧审计</p>');
+  const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await audit.waitFor();
+  await waitForRenderState(page, 'current');
+  await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+  const stable = {
+    body: await page.getByLabel('Markdown 正文').inputValue(),
+    auditId: await audit.getAttribute('data-diagnostic-id'),
+    checks: await page.locator('#format-checks').innerHTML(),
+    preview: await page.locator('#preview').innerHTML(),
+    renderStatus: await page.locator('#render-status').textContent(),
+    renders: renderRequests.length,
+    saves: savePayloads.length
+  };
+
+  payload = richResult({ markdown: '不得插入', removed: ['style'], downgraded: [], block: false });
+  await page.evaluate(() => {
+    document.execCommand = (_command, _ui, value) => {
+      const body = document.querySelector('#document-body');
+      body.setRangeText(`破坏-${value}`, body.selectionStart, body.selectionEnd, 'end');
+      body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      throw new Error('exec mutation then throw');
+    };
+    document.querySelector('#document-body').setSelectionRange(1, 1);
+  });
+  await dispatchHtmlPaste(page, '<p>不得插入</p>');
+  await page.getByText('浏览器无法安全插入转换后的富文本', { exact: false }).waitFor();
+  await page.waitForTimeout(700);
+  assert.deepEqual(await page.evaluate(() => ({
+    body: document.querySelector('#document-body').value,
+    checks: document.querySelector('#format-checks').innerHTML,
+    preview: document.querySelector('#preview').innerHTML,
+    renderStatus: document.querySelector('#render-status').textContent
+  })), { body: stable.body, checks: stable.checks, preview: stable.preview, renderStatus: stable.renderStatus });
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), stable.auditId);
+  assert.equal(renderRequests.length, stable.renders);
+  assert.equal(savePayloads.length, stable.saves);
+  assert.deepEqual(pageErrors, []);
+
+  await page.getByLabel('外链转脚注').check();
+  await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+  assert.equal(savePayloads.at(-1).body, stable.body, '失败插入后 documentModel.body 必须恢复');
+});
+
+test('image File execCommand 破坏正文后抛错会完整回滚且无未处理异常', async t => {
+  const { page, base } = await withBrowser(t);
+  const pageErrors = [];
+  const renderRequests = [];
+  const savePayloads = [];
+  page.on('pageerror', error => pageErrors.push(error.message));
+  await page.route('**/api/typesetting/render', route => {
+    const request = route.request().postDataJSON();
+    renderRequests.push(request);
+    return route.fulfill({ contentType: 'application/json', body: JSON.stringify({ ...emptyResult(request.body), presentation: { theme: request.theme, settings: request.settings } }) });
+  });
+  await page.route('**/api/typesetting/document', async route => {
+    if (route.request().method() === 'POST') savePayloads.push(route.request().postDataJSON());
+    await route.continue();
+  });
+  await page.route('**/api/typesetting/rich-text', route => route.fulfill({ contentType: 'application/json', body: JSON.stringify(richResult({ markdown: '建立旧审计', removed: ['script'], downgraded: [], block: false })) }));
+  await page.goto(base() + '/typesetting');
+  await page.getByLabel('Markdown 正文').fill('甲乙');
+  await page.evaluate(() => { window.confirm = () => true; const body = document.querySelector('#document-body'); body.setSelectionRange(1, 1); });
+  await dispatchHtmlPaste(page, '<p>建立旧审计</p>');
+  const audit = page.locator('.format-check-item[data-diagnostic-id^="rich-text-removal-"]');
+  await audit.waitFor();
+  await waitForRenderState(page, 'current');
+  await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+  const stable = {
+    body: await page.getByLabel('Markdown 正文').inputValue(),
+    auditId: await audit.getAttribute('data-diagnostic-id'),
+    checks: await page.locator('#format-checks').innerHTML(),
+    preview: await page.locator('#preview').innerHTML(),
+    renderStatus: await page.locator('#render-status').textContent(),
+    renders: renderRequests.length,
+    saves: savePayloads.length
+  };
+
+  await page.evaluate(() => {
+    document.execCommand = (_command, _ui, value) => {
+      const body = document.querySelector('#document-body');
+      body.setRangeText(`破坏-${value}`, body.selectionStart, body.selectionEnd, 'end');
+      body.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: value }));
+      throw new Error('image exec mutation then throw');
+    };
+    document.querySelector('#document-body').setSelectionRange(1, 1);
+  });
+  assert.equal(await dispatchImageFilePaste(page), true);
+  await page.getByText('浏览器无法安全插入图片占位', { exact: false }).waitFor();
+  await page.waitForTimeout(700);
+  assert.deepEqual(await page.evaluate(() => ({
+    body: document.querySelector('#document-body').value,
+    checks: document.querySelector('#format-checks').innerHTML,
+    preview: document.querySelector('#preview').innerHTML,
+    renderStatus: document.querySelector('#render-status').textContent
+  })), { body: stable.body, checks: stable.checks, preview: stable.preview, renderStatus: stable.renderStatus });
+  assert.equal(await audit.getAttribute('data-diagnostic-id'), stable.auditId);
+  assert.equal(renderRequests.length, stable.renders);
+  assert.equal(savePayloads.length, stable.saves);
+  assert.deepEqual(pageErrors, []);
+
+  await page.getByLabel('外链转脚注').check();
+  await page.getByText('已保存', { exact: true }).waitFor({ timeout: 1600 });
+  assert.equal(savePayloads.at(-1).body, stable.body, '失败图片插入后 documentModel.body 必须恢复');
 });
