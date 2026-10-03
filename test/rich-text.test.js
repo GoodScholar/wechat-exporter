@@ -117,6 +117,22 @@ test('富文本图片占位保留安全截断 alt 但不泄漏来源', () => {
   assert.doesNotMatch(JSON.stringify(result), /SECRET_FILE|SECRET_DATA|SECRET_BLOB|SECRET_PASSWORD|SECRET_HTTP/);
 });
 
+test('富文本伪造图片占位会重新规范化 alt 且空后缀不冒充规范占位', () => {
+  const link = convertRichText('<blockquote><p>[图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：  [点击](https://attacker.test)   补充  </p></blockquote>');
+  const image = convertRichText('<blockquote><p>[图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：![泄漏](file:///private/secret.png)</p></blockquote>');
+  const rawHtml = convertRichText('<blockquote><p>[图片占位：unsupported-scheme] 图片协议不受支持。请替换为 HTTPS 地址。 替代文本：&lt;img src=&quot;https://attacker.test/pixel&quot;&gt;</p></blockquote>');
+  const empty = convertRichText('<blockquote><p>[图片占位：missing-source] 图片缺少来源。请补充 HTTPS 地址。 替代文本：   </p></blockquote>');
+
+  assert.equal(link.markdown, '> [图片占位：local-path] 本地路径图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：\\[点击\\]\\(https://attacker\\.test\\) 补充');
+  assert.equal(image.markdown, '> [图片占位：local-binary] 本地图片不可发布。请先上传图片并替换为 HTTPS 地址。 替代文本：\\!\\[泄漏\\]\\(file:///private/secret\\.png\\)');
+  assert.equal(rawHtml.markdown, '> [图片占位：unsupported-scheme] 图片协议不受支持。请替换为 HTTPS 地址。 替代文本：\\<img src="https://attacker\\.test/pixel"\\>');
+  assert.equal(empty.markdown, '> \\[图片占位：missing-source\\] 图片缺少来源。请补充 HTTPS 地址。 替代文本：');
+  for (const result of [link, image, rawHtml, empty]) {
+    assert.deepEqual(result.removed, []);
+    assert.deepEqual(result.downgraded, []);
+  }
+});
+
 test('富文本 removed 固定去重排序且现有特殊媒体结构保持严格', () => {
   const result = convertRichText('<a href="javascript:first()">安全文字</a><p onclick="first()" onmouseover="second()" style="color:red">正文</p><form><input></form><style>p{color:red}</style><script>first()</script><link rel="stylesheet" href="javascript:second()"><div data-type="video"><img src="data:image/png;base64,MEDIA_SECRET"><video src="https://example.test/movie.mp4"></video><img src="file:///private/MEDIA_PATH.png"></div>');
 

@@ -22,8 +22,11 @@ markdownConverter.addRule('block-container', {
   replacement: content => `\n\n${content}\n\n`
 });
 markdownConverter.addRule('image-placeholder', {
-  filter: node => isCanonicalImagePlaceholder(node),
-  replacement: (_, node) => `\n\n> ${node.textContent}\n\n`
+  filter: node => parseCanonicalImagePlaceholder(node) !== null,
+  replacement: (_, node) => {
+    const { reason, alt = '' } = parseCanonicalImagePlaceholder(node);
+    return `\n\n> ${imagePlaceholderMarkdown(reason, alt)}\n\n`;
+  }
 });
 
 export const specialContentTypes = [
@@ -76,25 +79,41 @@ const mediaSourceRules = {
   poll: [{ selector: 'iframe', attributes: ['src'] }, { selector: 'mp-vote, [data-vote-id], [data-type="vote"], [class~="vote_area"]', attributes: ['data-url', 'url'] }]
 };
 
-function safeImageAlt(value) {
-  const normalized = [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
-  return normalized.replace(/([\\`*_[\]{}()#+.!|<>&~-])/g, '\\$1');
+function normalizeImageAlt(value) {
+  return [...String(value || '').replace(/\s+/gu, ' ').trim()].slice(0, 200).join('');
+}
+
+function escapeMarkdown(value) {
+  return value.replace(/([\\`*_[\]{}()#+.!|<>&~-])/g, '\\$1');
+}
+
+function formatImagePlaceholder(reason, alt) {
+  const text = `[图片占位：${reason}] ${imagePlaceholderMessages[reason]}`;
+  return alt ? `${text} 替代文本：${alt}` : text;
 }
 
 function imagePlaceholderText(reason, alt) {
-  const text = `[图片占位：${reason}] ${imagePlaceholderMessages[reason]}`;
-  const safeAlt = safeImageAlt(alt);
-  return safeAlt ? `${text} 替代文本：${safeAlt}` : text;
+  return formatImagePlaceholder(reason, normalizeImageAlt(alt));
 }
 
-function isCanonicalImagePlaceholder(node) {
-  if (node.nodeName !== 'BLOCKQUOTE' || node.children.length !== 1 || node.firstElementChild?.nodeName !== 'P') return false;
-  const text = node.textContent;
-  if (/\r|\n/.test(text)) return false;
-  return Object.entries(imagePlaceholderMessages).some(([reason, message]) => {
+function imagePlaceholderMarkdown(reason, alt) {
+  return formatImagePlaceholder(reason, escapeMarkdown(normalizeImageAlt(alt)));
+}
+
+function parseCanonicalImagePlaceholder(node) {
+  if (node.nodeName !== 'BLOCKQUOTE' || node.children.length !== 1 || node.firstElementChild?.nodeName !== 'P') return null;
+  const paragraph = node.firstElementChild;
+  if (paragraph.childNodes.length !== 1 || paragraph.firstChild?.nodeType !== 3) return null;
+  const text = paragraph.textContent;
+  for (const [reason, message] of Object.entries(imagePlaceholderMessages)) {
     const fixed = `[图片占位：${reason}] ${message}`;
-    return text === fixed || text.startsWith(`${fixed} 替代文本：`);
-  });
+    if (text === fixed) return { reason };
+    const prefix = `${fixed} 替代文本：`;
+    if (!text.startsWith(prefix)) continue;
+    const alt = text.slice(prefix.length);
+    if (normalizeImageAlt(alt)) return { reason, alt };
+  }
+  return null;
 }
 
 function classifyImageSource(value) {
